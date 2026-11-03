@@ -1,18 +1,18 @@
 """
- MNIST example with training and validation monitoring using Tensorboard.
- Requirements:
-    TensorboardX (https://github.com/lanpa/tensorboard-pytorch): `pip install tensorboardX`
-    or PyTorch >= 1.2 which supports Tensorboard
-    Tensorboard: `pip install tensorflow` (or just install tensorboard without the rest of tensorflow)
- Usage:
-    Start tensorboard:
-    ```bash
-    tensorboard --logdir=/tmp/tensorboard_logs/
-    ```
-    Run the example:
-    ```bash
-    python mnist_with_tensorboard.py --log_dir=/tmp/tensorboard_logs
-    ```
+MNIST example with training and validation monitoring using Tensorboard.
+Requirements:
+   TensorboardX (https://github.com/lanpa/tensorboard-pytorch): `pip install tensorboardX`
+   or PyTorch >= 1.2 which supports Tensorboard
+   Tensorboard: `pip install tensorflow` (or just install tensorboard without the rest of tensorflow)
+Usage:
+   Start tensorboard:
+   ```bash
+   tensorboard --logdir=/tmp/tensorboard_logs/
+   ```
+   Run the example:
+   ```bash
+   python mnist_with_tensorboard.py --log_dir=/tmp/tensorboard_logs
+   ```
 """
 
 from argparse import ArgumentParser
@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
 from torchvision.transforms import Compose, Normalize, ToTensor
 
-from ignite.engine import Events, create_supervised_evaluator, create_supervised_trainer
+from ignite.engine import create_supervised_evaluator, create_supervised_trainer, Events
 from ignite.metrics import Accuracy, Loss
 
 try:
@@ -34,7 +34,7 @@ except ImportError:
     try:
         from torch.utils.tensorboard import SummaryWriter
     except ImportError:
-        raise RuntimeError(
+        raise ModuleNotFoundError(
             "This module requires either tensorboardX or torch >= 1.2.0. "
             "You may install tensorboardX with command: \n pip install tensorboardX \n"
             "or upgrade PyTorch using your package manager of choice (pip or conda)."
@@ -43,7 +43,7 @@ except ImportError:
 
 class Net(nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
+        super().__init__()
         self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
         self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
         self.conv2_drop = nn.Dropout2d()

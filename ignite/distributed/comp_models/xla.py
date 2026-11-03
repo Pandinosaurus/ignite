@@ -1,4 +1,7 @@
-from typing import Any, Callable, Mapping, Optional, Tuple, cast
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from typing import Any, cast
 
 import torch
 
@@ -15,7 +18,6 @@ except ImportError:
 
 
 if has_xla_support:
-
     XLA_TPU = "xla-tpu"
 
     class _XlaDistModel(ComputationModel):
@@ -34,7 +36,7 @@ if has_xla_support:
         available_backends = (XLA_TPU,)
 
         @staticmethod
-        def create_from_context() -> Optional["_XlaDistModel"]:
+        def create_from_context() -> _XlaDistModel | None:
             return _XlaDistModel()
 
         @staticmethod
@@ -44,10 +46,9 @@ if has_xla_support:
 
             return _XlaDistModel(backend=backend, **kwargs)
 
-        def __init__(self, backend: Optional[str] = None, **kwargs: Any):
-            """This is a private method. Please, use `create_from_backend` or `create_from_context`
-            """
-            super(_XlaDistModel, self).__init__()
+        def __init__(self, backend: str | None = None, **kwargs: Any):
+            """This is a private method. Please, use `create_from_backend` or `create_from_context`"""
+            super().__init__()
             if backend is not None:
                 self._create_from_backend(backend, **kwargs)
             else:
@@ -56,7 +57,8 @@ if has_xla_support:
         def _create_from_backend(self, backend: str, **kwargs: Any) -> None:
             xm.rendezvous("init")
 
-            self._backend = backend  # type: str
+            # pyrefly: ignore [bad-override]
+            self._backend: str = backend
             self._setup_attrs()
 
         def _init_from_context(self) -> None:
@@ -65,7 +67,7 @@ if has_xla_support:
 
         def _compute_nproc_per_node(self) -> int:
             tensor = torch.tensor([self.get_local_rank() + 1.0], dtype=torch.float).to(self.device())
-            xm.all_reduce("max", [tensor,])
+            xm.all_reduce("max", [tensor])
             return int(tensor.item())
 
         def get_local_rank(self) -> int:
@@ -98,7 +100,7 @@ if has_xla_support:
 
         @staticmethod
         def _dist_worker_task_fn(
-            local_rank: int, backend: str, fn: Callable, args: Tuple, kwargs_dict: Mapping
+            local_rank: int, backend: str, fn: Callable, args: tuple, kwargs_dict: Mapping
         ) -> None:
             from ignite.distributed.utils import _set_model, finalize
 
@@ -108,10 +110,11 @@ if has_xla_support:
             finalize()
 
         @staticmethod
-        def spawn(  # type: ignore[override]
+        # pyrefly: ignore [bad-override]
+        def spawn(
             fn: Callable,
-            args: Tuple,
-            kwargs_dict: Optional[Mapping] = None,
+            args: tuple,
+            kwargs_dict: Mapping | None = None,
             nproc_per_node: int = 1,
             nnodes: int = 1,
             node_rank: int = 0,
@@ -138,27 +141,45 @@ if has_xla_support:
             "OR": "or",
         }
 
-        def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM") -> torch.Tensor:
-            if op not in self._reduce_op_map:
-                raise ValueError(f"Unsupported reduction operation: '{op}'")
+        def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM", group: Any | None = None) -> torch.Tensor:
+            if group is not None and not self._check_group_type(group):
+                raise ValueError("Argument group should be list of int")
             op = self._reduce_op_map[op]
-            xm.all_reduce(op, [tensor,])
+            xm.all_reduce(op, [tensor], groups=group)
             return tensor
 
-        def _do_all_gather(self, tensor: torch.Tensor) -> torch.Tensor:
+        def _do_all_gather(self, tensor: torch.Tensor, group: Any | None = None) -> torch.Tensor:
             # from https://github.com/jysohn23/xla/blob/model-parallel-colab/Gather_Scatter_Broadcast_PyTorch_XLA.ipynb
+
+            if group is not None and (not isinstance(group, list) or not all(isinstance(item, int) for item in group)):
+                raise ValueError("Argument group should be list of int")
+
             group_size = self.get_world_size()
             output = torch.zeros((group_size,) + tensor.shape, dtype=tensor.dtype, device=tensor.device)
             output[self.get_rank() % group_size] = tensor
-            xm.all_reduce("sum", [output,])
+            xm.all_reduce("sum", [output], groups=group)
             return output.reshape(-1, *output.shape[2:])
+
+        def _do_all_gather_object(self, tensor: Any, group: Any | None = None) -> list[Any]:
+            raise NotImplementedError("all_gather on object is not implemented for xla")
+
+        def _do_new_group(self, ranks: list[int], **kwargs: Any) -> Any:
+            return [ranks]
 
         def _do_broadcast(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
             # from https://github.com/jysohn23/xla/blob/model-parallel-colab/Gather_Scatter_Broadcast_PyTorch_XLA.ipynb
             if src != self.get_rank():
                 tensor.fill_(0.0)
-            xm.all_reduce("sum", [tensor,])
+            xm.all_reduce("sum", [tensor])
             return tensor
 
         def barrier(self) -> None:
             xm.rendezvous("barrier")
+
+        def _check_group_type(self, group: Any | None) -> bool:
+            if isinstance(group, list) and all(isinstance(item, int) for item in group):
+                return True
+            return False
+
+        def _rank_not_in_group(self, group: Any) -> bool:
+            return self.get_rank() not in group

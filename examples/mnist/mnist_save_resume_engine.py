@@ -11,9 +11,9 @@ from torchvision.datasets import MNIST
 from torchvision.transforms import Compose, Normalize, ToTensor
 from tqdm import tqdm
 
-from ignite.engine import Events, create_supervised_evaluator, create_supervised_trainer
+from ignite.engine import create_supervised_evaluator, create_supervised_trainer, Events
 from ignite.handlers import Checkpoint, DiskSaver
-from ignite.metrics import Accuracy, Loss
+from ignite.metrics import Accuracy, Loss, RunningAverage
 from ignite.utils import manual_seed
 
 try:
@@ -22,7 +22,7 @@ except ImportError:
     try:
         from torch.utils.tensorboard import SummaryWriter
     except ImportError:
-        raise RuntimeError(
+        raise ModuleNotFoundError(
             "This module requires either tensorboardX or torch >= 1.2.0. "
             "You may install tensorboardX with command: \n pip install tensorboardX \n"
             "or upgrade PyTorch using your package manager of choice (pip or conda)."
@@ -32,7 +32,7 @@ except ImportError:
 # Basic model's definition
 class Net(nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
+        super().__init__()
         self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
         self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
         self.conv2_drop = nn.Dropout2d()
@@ -50,8 +50,7 @@ class Net(nn.Module):
 
 
 def get_data_loaders(train_batch_size, val_batch_size):
-    """Method to setup data loaders: train_loader and val_loader
-    """
+    """Method to setup data loaders: train_loader and val_loader"""
     data_transform = Compose([ToTensor(), Normalize((0.1307,), (0.3081,))])
 
     train_loader = DataLoader(
@@ -71,8 +70,7 @@ def get_data_loaders(train_batch_size, val_batch_size):
 
 
 def log_model_weights(engine, model=None, fp=None, **kwargs):
-    """Helper method to log norms of model weights: print and dump into a file
-    """
+    """Helper method to log norms of model weights: print and dump into a file"""
     assert model and fp
     output = {"total": 0.0}
     max_counter = 5
@@ -92,8 +90,7 @@ def log_model_weights(engine, model=None, fp=None, **kwargs):
 
 
 def log_model_grads(engine, model=None, fp=None, **kwargs):
-    """Helper method to log norms of model gradients: print and dump into a file
-    """
+    """Helper method to log norms of model gradients: print and dump into a file"""
     assert model and fp
     output = {"grads/total": 0.0}
     max_counter = 5
@@ -116,8 +113,7 @@ def log_model_grads(engine, model=None, fp=None, **kwargs):
 
 
 def log_data_stats(engine, fp=None, **kwargs):
-    """Helper method to log mean/std of input batch of images and median of batch of targets.
-    """
+    """Helper method to log mean/std of input batch of images and median of batch of targets."""
     assert fp
     x, y = engine.state.batch
     output = {
@@ -166,10 +162,11 @@ def run(
     if deterministic:
         tqdm.write("Setup deterministic trainer")
     trainer = create_supervised_trainer(model, optimizer, criterion, device=device, deterministic=deterministic)
+    running_loss = RunningAverage(output_transform=lambda x: x)
+    running_loss.attach(trainer, "rloss")
 
-    evaluator = create_supervised_evaluator(
-        model, metrics={"accuracy": Accuracy(), "nll": Loss(criterion)}, device=device
-    )
+    metrics = {"accuracy": Accuracy(), "nll": Loss(criterion)}
+    evaluator = create_supervised_evaluator(model, metrics, device)
 
     # Apply learning rate scheduling
     @trainer.on(Events.EPOCH_COMPLETED)
@@ -181,9 +178,10 @@ def run(
     @trainer.on(Events.ITERATION_COMPLETED(every=log_interval))
     def log_training_loss(engine):
         lr = optimizer.param_groups[0]["lr"]
-        pbar.desc = f"Epoch {engine.state.epoch} - loss: {engine.state.output:.4f} - lr: {lr:.4f}"
+        rloss = engine.state.metrics["rloss"]
+        pbar.desc = f"Epoch {engine.state.epoch} - loss: {rloss:.4f} - lr: {lr:.4f}"
         pbar.update(log_interval)
-        writer.add_scalar("training/loss", engine.state.output, engine.state.iteration)
+        writer.add_scalar("training/running_loss", rloss, engine.state.iteration)
         writer.add_scalar("lr", lr, engine.state.iteration)
 
     if crash_iteration > 0:
@@ -226,7 +224,14 @@ def run(
         writer.add_scalar("valdation/avg_accuracy", avg_accuracy, engine.state.epoch)
 
     # Setup object to checkpoint
-    objects_to_checkpoint = {"trainer": trainer, "model": model, "optimizer": optimizer, "lr_scheduler": lr_scheduler}
+    objects_to_checkpoint = {
+        "trainer": trainer,
+        "model": model,
+        "optimizer": optimizer,
+        "lr_scheduler": lr_scheduler,
+        "train_running_loss": running_loss,
+        "metrics": metrics,
+    }
     training_checkpoint = Checkpoint(
         to_save=objects_to_checkpoint,
         save_handler=DiskSaver(log_dir, require_empty=False),

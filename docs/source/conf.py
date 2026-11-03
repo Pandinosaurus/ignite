@@ -12,7 +12,10 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
+import doctest
+
 import os
+import shutil
 import sys
 
 sys.path.insert(0, os.path.abspath("../.."))
@@ -59,7 +62,21 @@ extensions = [
     "sphinx.ext.viewcode",
     "sphinx.ext.autosectionlabel",
     "sphinx_copybutton",
+    "sphinx_togglebutton",
+    "sphinx_design",
 ]
+
+# toggle button hint text
+togglebutton_hint = "Show default setup"
+togglebutton_hint_hide = "Hide default setup"
+
+# Copy defaults.rst to source/generated to be discoverable in docstrings
+# Skip this step for previous versions of ignite
+if os.path.exists("defaults.rst"):
+    src_folder = os.path.dirname(__file__)
+    gen_folder = os.path.join(src_folder, "generated")
+    os.makedirs(gen_folder, exist_ok=True)
+    shutil.copy(os.path.join(src_folder, "defaults.rst"), gen_folder)
 
 # katex options
 katex_prerender = True
@@ -91,6 +108,10 @@ exclude_patterns = []
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = "sphinx"
 
+# -- Options for doctest ------------------------------------------------------
+
+# Enable ellipsis for floating-point comparisons
+doctest_default_flags = doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE
 
 # -- Options for HTML output -------------------------------------------------
 
@@ -129,7 +150,7 @@ html_context = {
         # 'https://fonts.googleapis.com/css?family=Lato',
         # '_static/css/pytorch_theme.css'
         "_static/css/ignite_theme.css",
-        "https://cdn.jsdelivr.net/npm/@docsearch/css@1.0.0-alpha.28/dist/style.min.css",
+        "https://cdn.jsdelivr.net/npm/@docsearch/css@3",
     ],
 }
 
@@ -200,7 +221,7 @@ texinfo_documents = [
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
-    "torch": ("https://pytorch.org/docs/stable/", None),
+    "torch": ("https://docs.pytorch.org/docs/stable/", None),
 }
 
 # -- Options for todo extension ----------------------------------------------
@@ -286,7 +307,15 @@ class AutolistAutosummary(Autosummary):
                         names = [name[0] for name in getmembers(module)]
 
                 # Filter out members w/o doc strings
-                names = [name for name in names if getattr(module, name).__doc__ is not None]
+                filtered_names = []
+                for name in names:
+                    try:
+                        if not name.startswith("_") and getattr(module, name).__doc__ is not None:
+                            filtered_names.append(name)
+                    except AttributeError:
+                        continue
+
+                names = filtered_names
 
                 if auto == "autolist":
                     # Get list of all classes and functions inside module
@@ -319,64 +348,96 @@ nitpicky = True
 nitpick_ignore = [
     ("py:class", ".."),
     ("py:class", "TextIO"),
+    ("py:class", "collections.abc.Callable"),
+    ("py:class", "collections.abc.Iterable"),
+    ("py:class", "collections.abc.Mapping"),
+    ("py:class", "collections.abc.Sequence"),
+    ("py:class", "collections.OrderedDict"),
+    ("py:class", "enum.Enum"),
+    ("py:class", "logging.Logger"),
+    ("py:class", "pathlib.Path"),
     ("py:class", "torch.device"),
     ("py:class", "_MpDeviceLoader"),
     ("py:class", "torch.nn.modules.module.Module"),
     ("py:class", "torch.optim.optimizer.Optimizer"),
     ("py:class", "torch.utils.data.dataset.Dataset"),
+    ("py:class", "Dataset"),
     ("py:class", "torch.utils.data.sampler.BatchSampler"),
-    ("py:class", "torch.cuda.amp.grad_scaler.GradScaler"),
+    ("py:class", "torch.utils.data.sampler.Sampler"),
+    ("py:class", "Sampler"),
+    ("py:class", "torch.utils.data.distributed.DistributedSampler"),
+    ("py:class", "torch.amp.grad_scaler.GradScaler"),
+    ("py:class", "torch.amp.GradScaler"),
+    ("py:class", "GradScaler"),
     ("py:class", "torch.optim.lr_scheduler._LRScheduler"),
+    ("py:class", "torch.optim.lr_scheduler.LRScheduler"),
     ("py:class", "torch.utils.data.dataloader.DataLoader"),
+    ("py:class", "DataLoader"),
 ]
 
-# doctest config
-doctest_global_setup = """
-from collections import OrderedDict
+nitpick_aliases = {
+    "ignite.handlers.checkpoint.Checkpoint": "ignite.handlers.Checkpoint",
+    "ignite.handlers.checkpoint.ModelCheckpoint": "ignite.handlers.ModelCheckpoint",
+    "ignite.handlers.ema_handler.EMAHandler": "ignite.handlers.EMAHandler",
+    "ignite.handlers.early_stopping.EarlyStopping": "ignite.handlers.EarlyStopping",
+    "ignite.handlers.lr_finder.FastaiLRFinder": "ignite.handlers.FastaiLRFinder",
+    "ignite.handlers.stores.EpochOutputStore": "ignite.handlers.EpochOutputStore",
+    "ignite.handlers.terminate_on_nan.TerminateOnNan": "ignite.handlers.TerminateOnNan",
+    "ignite.handlers.time_profilers.BasicTimeProfiler": "ignite.handlers.BasicTimeProfiler",
+    "ignite.handlers.time_profilers.HandlersTimeProfiler": "ignite.handlers.HandlersTimeProfiler",
+    "ignite.handlers.timing.Timer": "ignite.handlers.Timer",
+    "ignite.metrics.confusion_matrix.ConfusionMatrix": "ignite.metrics.ConfusionMatrix",
+    "ignite.metrics.metric.Metric": "ignite.metrics.Metric",
+    "ignite.metrics.metric_group.MetricGroup": "ignite.metrics.MetricGroup",
+    "ignite.metrics.metrics_lambda.MetricsLambda": "ignite.metrics.MetricsLambda",
+    "ignite.metrics.precision.Precision": "ignite.metrics.Precision",
+    "ignite.metrics.recall.Recall": "ignite.metrics.Recall",
+    "ignite.metrics.vision.object_detection_average_precision_recall.coco_tensor_list_to_dict_list": (
+        "ignite.metrics.coco_tensor_list_to_dict_list"
+    ),
+    "metrics.precision.Precision": "ignite.metrics.Precision",
+}
 
-import torch
-from torch import nn, optim
 
-from ignite.engine import *
-from ignite.handlers import *
-from ignite.metrics import *
-from ignite.utils import *
-from ignite.contrib.metrics.regression import *
-from ignite.contrib.metrics import *
+def _resolve_nitpick_aliases(app, env, node, contnode):
+    target = node.get("reftarget")
+    if node.get("refdomain") != "py" or not isinstance(target, str):
+        return None
 
-# create default evaluator for doctests
+    for source, alias in nitpick_aliases.items():
+        if target == source or target.startswith(f"{source}."):
+            ref_type = node["reftype"]
+            target = f"{alias}{target[len(source) :]}"
+            return app.env.domains["py"].resolve_xref(
+                env, node["refdoc"], app.builder, ref_type, target, node, contnode
+            )
 
-def eval_step(engine, batch):
-    return batch
+    return None
 
-default_evaluator = Engine(eval_step)
 
-# create default optimizer for doctests
+linkcheck_ignore = [
+    "https://github.com/fossasia/visdom#visdom-arguments-python-only",
+    "https://github.com/pytorch/ignite/tree/master/examples/cifar10#check-resume-training",
+    "https://github.com/pytorch/ignite/tree/master/examples/mnist#training-save--resume",
+    "https://machinelearningmastery.com/gentle-introduction-backpropagation-time/",
+    "https://github.com/pytorch/pytorch/issues/7844#issuecomment-503713840",
+    "https://github.com/pytorch/pytorch/issues/23430#issuecomment-562350407",
+    r"https://pytorch\.org/xla/release/.*",
+    # PyTorch docs anchors occasionally move while the linked pages remain valid.
+    r"https://(docs\.)?pytorch\.org/docs/stable/.*#.*",
+    "https://aclanthology.org/W04-1013",
+]
 
-param_tensor = torch.zeros([1], requires_grad=True)
-default_optimizer = torch.optim.SGD([param_tensor], lr=0)
-
-# create default trainer for doctests
-# as handlers could be attached to the trainer,
-# each test must defined his own trainer using `.. testsetup:`
-
-def get_default_trainer():
-
-    def train_step(engine, batch):
-        return 0.0
-
-    return Engine(train_step)
-
-# create default model for doctests
-
-default_model = nn.Sequential(OrderedDict([
-    ('base', nn.Linear(4, 2)),
-    ('fc', nn.Linear(2, 1))
-]))
-
-manual_seed(666)
-"""
+linkcheck_allowed_redirects = {
+    r"https://ui\.neptune\.ai/.*": r"https://app\.neptune\.ai/.*",
+    r"https://pytorch\.org/docs/.*": r"https://docs\.pytorch\.org/docs/.*",
+    r"https://github\.com/allegroai/clearml": r"https://github\.com/clearml/clearml",
+    r"https://horovod\.readthedocs\.io/?$": r"https://horovod\.readthedocs\.io/.*",
+    r"https://docs\.wandb\.ai/ref/.*": r"https://docs\.wandb\.ai/models/.*",
+    r"https://docs\.wandb\.ai/models/.*": r"https://docs\.coreweave\.com/products/wandb/.*",
+}
 
 
 def setup(app):
     app.add_directive("autosummary", AutolistAutosummary, override=True)
+    app.connect("missing-reference", _resolve_nitpick_aliases)

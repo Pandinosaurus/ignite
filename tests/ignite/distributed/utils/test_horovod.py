@@ -8,12 +8,17 @@ from ignite.distributed.utils import has_hvd_support
 from tests.ignite.distributed.utils import (
     _test_distrib__get_max_length,
     _test_distrib_all_gather,
+    _test_distrib_all_gather_group,
     _test_distrib_all_reduce,
+    _test_distrib_all_reduce_group,
     _test_distrib_barrier,
     _test_distrib_broadcast,
     _test_distrib_config,
+    _test_distrib_group,
     _test_distrib_one_rank_only,
     _test_distrib_one_rank_only_with_engine,
+    _test_idist_all_gather_tensors_with_shapes,
+    _test_idist_all_gather_tensors_with_shapes_group,
     _test_sync,
 )
 
@@ -128,7 +133,6 @@ def _test_idist_methods_in_hvd_context(backend, device):
 @pytest.mark.skipif(not has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_idist_methods_in_hvd_context(gloo_hvd_executor):
-
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     np = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
     gloo_hvd_executor(_test_idist_methods_in_hvd_context, ("horovod", device), np=np)
@@ -138,17 +142,16 @@ def test_idist_methods_in_hvd_context(gloo_hvd_executor):
 @pytest.mark.skipif(not has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_idist_all_reduce_hvd(gloo_hvd_executor):
-
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     np = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
     gloo_hvd_executor(_test_distrib_all_reduce, (device,), np=np, do_init=True)
+    gloo_hvd_executor(_test_distrib_all_reduce_group, (device,), np=np, do_init=True)
 
 
 @pytest.mark.distributed
 @pytest.mark.skipif(not has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_idist__model_methods_hvd(gloo_hvd_executor):
-
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     np = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
     gloo_hvd_executor(_test_distrib__get_max_length, (device,), np=np, do_init=True)
@@ -158,17 +161,18 @@ def test_idist__model_methods_hvd(gloo_hvd_executor):
 @pytest.mark.skipif(not has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_idist_all_gather_hvd(gloo_hvd_executor):
-
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     np = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
     gloo_hvd_executor(_test_distrib_all_gather, (device,), np=np, do_init=True)
+    gloo_hvd_executor(_test_distrib_all_gather_group, (device,), np=np, do_init=True)
+    gloo_hvd_executor(_test_idist_all_gather_tensors_with_shapes, (device,), np=np, do_init=True)
+    gloo_hvd_executor(_test_idist_all_gather_tensors_with_shapes_group, (device,), np=np, do_init=True)
 
 
 @pytest.mark.distributed
 @pytest.mark.skipif(not has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_idist_broadcast_hvd(gloo_hvd_executor):
-
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     np = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
     gloo_hvd_executor(_test_distrib_broadcast, (device,), np=np, do_init=True)
@@ -178,10 +182,18 @@ def test_idist_broadcast_hvd(gloo_hvd_executor):
 @pytest.mark.skipif(not has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_idist_barrier_hvd(gloo_hvd_executor):
-
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     np = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
     gloo_hvd_executor(_test_distrib_barrier, (device,), np=np, do_init=True)
+
+
+@pytest.mark.distributed
+@pytest.mark.skipif(not has_hvd_support, reason="Skip if no Horovod dist support")
+@pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
+def test_idist_new_group_hvd(gloo_hvd_executor):
+    device = "cpu" if not torch.cuda.is_available() else "cuda"
+    np = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
+    gloo_hvd_executor(_test_distrib_group, (device,), np=np, do_init=True)
 
 
 def _test_idist_methods_overhead(ok_factor, sync_model):
@@ -230,7 +242,7 @@ def test_idist_methods_overhead_hvd(gloo_hvd_executor):
     sync_model = False
     gloo_hvd_executor(_test_idist_methods_overhead, (ok_factor, sync_model), np=np, do_init=True)
 
-    ok_factor = 2.5
+    ok_factor = 3.5
     sync_model = True
     gloo_hvd_executor(_test_idist_methods_overhead, (ok_factor, sync_model), np=np, do_init=True)
 

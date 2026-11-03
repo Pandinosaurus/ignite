@@ -1,14 +1,14 @@
 import logging
-import os
+import platform
 import sys
-from collections import namedtuple
-from distutils.version import LooseVersion
+from collections import defaultdict, namedtuple
 
 import pytest
 import torch
+from packaging.version import Version
 
 from ignite.engine import Engine, Events
-from ignite.utils import convert_tensor, deprecated, hash_checkpoint, setup_logger, to_onehot
+from ignite.utils import _to_str_list, convert_tensor, deprecated, hash_checkpoint, setup_logger, to_onehot
 
 
 def test_convert_tensor():
@@ -49,10 +49,40 @@ def test_convert_tensor():
     assert torch.is_tensor(dict_["a"])
     assert torch.is_tensor(dict_["b"])
 
+    x = defaultdict(list, {"a": torch.tensor([0.0])})
+    dict_ = convert_tensor(x, device="cpu")
+    assert isinstance(dict_, defaultdict)
+    assert dict_ is not x
+    assert dict_.default_factory is list
+    assert torch.is_tensor(dict_["a"])
+
     assert convert_tensor("a") == "a"
 
     with pytest.raises(TypeError):
         convert_tensor(12345)
+
+
+@pytest.mark.parametrize(
+    "input_data,expected",
+    [
+        (42, ["42.0000"]),
+        ([{"a": 15, "b": torch.tensor([2.0])}], ["a: 15.0000", "b: [2.0000]"]),
+        ({"a": 10, "b": 2.33333}, ["a: 10.0000", "b: 2.3333"]),
+        ({"x": torch.tensor(0.1234), "y": [1, 2.3567]}, ["x: 0.1234", "y: 1.0000, 2.3567"]),
+        (({"nested": [3.1415, torch.tensor(0.0001)]},), ["nested: 3.1415, 0.0001"]),
+        (
+            {"large_vector": torch.tensor(range(20))},
+            ["large_vector: [0.0000, 1.0000, 2.0000, 3.0000, 4.0000, 5.0000, 6.0000, 7.0000, 8.0000, 9.0000, ...]"],
+        ),
+        ({"large_matrix": torch.randn(5, 5)}, ["large_matrix: Shape[5, 5]"]),
+        ({"empty": []}, ["empty: "]),
+        ([], []),
+        ({"none": None}, ["none: "]),
+        ({1: 100, 2: 200}, ["1: 100.0000", "2: 200.0000"]),
+    ],
+)
+def test__to_str_list(input_data, expected):
+    assert _to_str_list(input_data) == expected
 
 
 def test_to_onehot():
@@ -87,7 +117,7 @@ def test_to_onehot():
     # Test inside `torch.nn.Module`
     class SLP(torch.nn.Module):
         def __init__(self):
-            super(SLP, self).__init__()
+            super().__init__()
             self.linear = torch.nn.Linear(4, 1)
 
         def forward(self, x):
@@ -101,13 +131,11 @@ def test_to_onehot():
 
 
 def test_dist_setup_logger():
-
     logger = setup_logger("trainer", level=logging.CRITICAL, distributed_rank=1)
     assert logger.level != logging.CRITICAL
 
 
 def test_setup_logger(capsys, dirname):
-
     trainer = Engine(lambda e, b: None)
     evaluator = Engine(lambda e, b: None)
 
@@ -116,10 +144,9 @@ def test_setup_logger(capsys, dirname):
     trainer.logger.addHandler(logging.NullHandler())
     trainer.logger.addHandler(logging.NullHandler())
 
-    fp = os.path.join(dirname, "log")
+    fp = dirname / "log"
 
     def _test(stream):
-
         trainer.logger = setup_logger("trainer", stream=stream, filepath=fp, reset=True)
         evaluator.logger = setup_logger("evaluator", stream=stream, filepath=fp, reset=True)
 
@@ -159,7 +186,6 @@ def _setup_a_logger_and_dump(name, message):
 
 
 def test_override_setup_logger(capsys):
-
     _setup_a_logger_and_dump(__name__, "test_override_setup_logger")
 
     source = capsys.readouterr().err.split("\n")
@@ -179,8 +205,30 @@ def test_override_setup_logger(capsys):
     logging.shutdown()
 
 
-def test_deprecated():
+@pytest.mark.parametrize("encoding", [None, "utf-8"])
+def test_setup_logger_encoding(encoding, dirname):
+    fp = dirname / "log.txt"
+    logger = setup_logger(name="logger", filepath=fp, encoding=encoding, reset=True)
+    test_words = ["say hello", "say 你好", "say こんにちわ", "say 안녕하세요", "say привет"]
+    for w in test_words:
+        logger.info(w)
+    logging.shutdown()
 
+    with open(fp, "r", encoding=encoding) as h:
+        data = h.readlines()
+
+    if platform.system() == "Windows" and encoding is None:
+        flatten_data = "\n".join(data)
+        assert test_words[0] in flatten_data
+        for word in test_words[1:]:
+            assert word not in flatten_data
+    else:
+        assert len(data) == len(test_words)
+        for expected, output in zip(test_words, data):
+            assert expected in output
+
+
+def test_deprecated():
     # Test on function without docs, @deprecated without reasons
     @deprecated("0.4.2", "0.6.0")
     def func_no_docs():
@@ -191,29 +239,26 @@ def test_deprecated():
     # Test on function with docs, @deprecated without reasons
     @deprecated("0.4.2", "0.6.0")
     def func_no_reasons():
-        """Docs are cool
-        """
+        """Docs are cool"""
         return 24
 
-    assert func_no_reasons.__doc__ == "**Deprecated function**.\n\n    Docs are cool\n        .. deprecated:: 0.4.2"
+    assert func_no_reasons.__doc__ == "**Deprecated function**.\n\n    Docs are cool.. deprecated:: 0.4.2"
 
     # Test on function with docs, @deprecated with reasons
     @deprecated("0.4.2", "0.6.0", reasons=("r1", "r2"))
     def func_no_warnings():
-        """Docs are very cool
-        """
+        """Docs are very cool"""
         return 24
 
     assert (
         func_no_warnings.__doc__
-        == "**Deprecated function**.\n\n    Docs are very cool\n        .. deprecated:: 0.4.2\n\n\t\n\t- r1\n\t- r2"
+        == "**Deprecated function**.\n\n    Docs are very cool.. deprecated:: 0.4.2\n\n\t\n\t- r1\n\t- r2"
     )
 
     # Tests that the function emits DeprecationWarning
     @deprecated("0.4.2", "0.6.0", reasons=("r1", "r2"))
     def func_check_warning():
-        """Docs are very ...
-        """
+        """Docs are very ..."""
         return 24
 
     with pytest.deprecated_call():
@@ -245,14 +290,14 @@ def test_smoke__utils():
     from ignite._utils import apply_to_tensor, apply_to_type, convert_tensor, to_onehot  # noqa: F401
 
 
-@pytest.mark.skipif(LooseVersion(torch.__version__) < LooseVersion("1.5.0"), reason="Skip if < 1.5.0")
+@pytest.mark.skipif(Version(torch.__version__) < Version("1.5.0"), reason="Skip if < 1.5.0")
 def test_hash_checkpoint(tmp_path):
     # download lightweight model
     from torchvision.models import squeezenet1_0
 
     model = squeezenet1_0()
     torch.hub.download_url_to_file(
-        "https://download.pytorch.org/models/squeezenet1_0-b66bff10.pth", f"{tmp_path}/squeezenet1_0.pt",
+        "https://download.pytorch.org/models/squeezenet1_0-b66bff10.pth", f"{tmp_path}/squeezenet1_0.pt"
     )
     hash_checkpoint_path, sha_hash = hash_checkpoint(f"{tmp_path}/squeezenet1_0.pt", str(tmp_path))
     model.load_state_dict(torch.load(str(hash_checkpoint_path), "cpu"), True)

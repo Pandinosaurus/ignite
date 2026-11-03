@@ -17,12 +17,12 @@ into the following categories:
 3. You would like to improve the documentation. This is no less important than improving the library itself!
    If you find a typo in the documentation, do not hesitate to submit a GitHub pull request.
 
-4. You would like propose a new feature and implement it
+4. You would like to propose a new feature and implement it
 
    - Post about your intended feature, and we shall discuss the design and
      implementation. Once we agree that the plan looks good, go ahead and implement it.
 
-5. You would like implement a feature or bug-fix for an outstanding issue
+5. You would like to implement a feature or bug-fix for an outstanding issue
    - Look at the issues labelled as ["help wanted"](https://github.com/pytorch/ignite/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
    - Pick an issue and comment on the task that you want to work on this feature.
    - If you need more context on a particular issue, please ask and we shall provide.
@@ -35,12 +35,12 @@ into the following categories:
   - [Installation](#installation)
   - [Code development](#code-development)
     - [Codebase structure](#codebase-structure)
-    - [Formatting Code](#formatting-code)
-      - [Formatting without pre-commit](#formatting-without-pre-commit)
-      - [Formatting with pre-commit](#formatting-with-pre-commit)
+    - [Checking Code Style](#checking-code-style)
+      - [Formatting the code](#formatting-the-code)
+      - [Formatting the code with a pre-commit hook](#formatting-the-code-with-a-pre-commit-hook)
     - [Run tests](#run-tests)
       - [Run distributed tests only on CPU](#run-distributed-tests-only-on-cpu)
-    - [Run Mypy checks](#run-mypy-checks)
+    - [Run Pyrefly checks](#run-pyrefly-checks)
     - [Send a PR](#send-a-pr)
       - [Sync up with the upstream](#sync-up-with-the-upstream)
   - [Writing documentation](#writing-documentation)
@@ -57,11 +57,11 @@ into the following categories:
 
 <details>
 
-- Install [miniconda](https://docs.conda.io/projects/continuumio-conda/en/latest/user-guide/install/index.html) for your system.
+- Install [miniconda](https://docs.conda.io/en/latest/miniconda.html) for your system.
 - Create an isolated conda environment for pytorch-ignite:
 
 ```bash
-conda create -n pytorch-ignite-dev python=3.8
+conda create -n pytorch-ignite-dev python=3.11
 ```
 
 - Activate the newly created environment:
@@ -80,14 +80,33 @@ conda activate pytorch-ignite-dev
 
 ### Installation
 
-To get the development installation with the necessary dependencies, run the following:
+1. Make a fork of the repository on the GitHub (see [here](https://github.com/firstcontributions/first-contributions#fork-this-repository) for details).
+   As a result, for example your username is `happy-ignite-developer`, then you should be able to see your fork on the GitHub, e.g https://github.com/happy-ignite-developer/ignite.git
+
+2. Clone your fork locally and setup `upstream`. Assuming your username is `happy-ignite-developer`:
 
 ```bash
-git clone https://github.com/pytorch/ignite.git
+git clone https://github.com/happy-ignite-developer/ignite.git
 cd ignite
-python setup.py develop
+git remote add upstream https://github.com/pytorch/ignite.git
+git remote -v
+```
+
+You might see the following output:
+
+```
+origin  https://github.com/happy-ignite-developer/ignite.git (fetch)
+origin  https://github.com/happy-ignite-developer/ignite.git (push)
+upstream        https://github.com/pytorch/ignite (fetch)
+upstream        https://github.com/pytorch/ignite (push)
+```
+
+3. Sync and install all necessary dependencies:
+
+```bash
+git pull upstream master
+pip install -e .
 pip install -r requirements-dev.txt
-bash ./tests/run_code_style.sh install
 ```
 
 ### Code development
@@ -109,65 +128,55 @@ If you modify the code, you will most probably also need to code some tests to e
 
 - naming convention for files `test_*.py`, e.g. `test_precision.py`
 - naming of testing functions `def test_*`, e.g. `def test_precision_on_random_data()`
-  - if test function should run on GPU, please **make sure to add `cuda`** in the test name, e.g. `def test_something_on_cuda()`. 
-  Additionally, we may want to decorate it with `@pytest.mark.skipif(not torch.cuda.is_available(), reason="Skip if no GPU")`.
-  For more examples, please see https://github.com/pytorch/ignite/blob/master/tests/ignite/engine/test_create_supervised.py
-  - if test function checks distributed configuration, we have to mark the test as `@pytest.mark.distributed` and additional 
-  conditions depending on the intended checks. For example, please see 
-  https://github.com/pytorch/ignite/blob/master/tests/ignite/metrics/test_accuracy.py
-
+  - if test function should run on GPU, please **make sure to add `cuda`** in the test name, e.g. `def test_something_on_cuda()`.
+    Additionally, we may want to decorate it with `@pytest.mark.skipif(not torch.cuda.is_available(), reason="Skip if no GPU")`.
+    For more examples, please see https://github.com/pytorch/ignite/blob/master/tests/ignite/engine/test_create_supervised.py
+  - if test function checks distributed configuration, we have to mark the test as `@pytest.mark.distributed` and additional
+    conditions depending on the intended checks. For example, please see
+    https://github.com/pytorch/ignite/blob/master/tests/ignite/metrics/test_accuracy.py
 
 New code should be compatible with Python 3.X versions. Once you finish implementing a feature or bugfix and tests,
 please run lint checking and tests:
 
-#### Formatting Code
+#### Checking Code Style
 
-To ensure the codebase complies with a style guide, we use [flake8](https://flake8.pycqa.org/en/latest/),
-[black](https://black.readthedocs.io/en/stable/) and [isort](https://pycqa.github.io/isort/) tools to
-format and check codebase for compliance with PEP8.
+To ensure the codebase complies with the PEP8 style guide, we use [ruff](https://docs.astral.sh/ruff/) to lint and [ruff format](https://docs.astral.sh/ruff/formatter/) to format the codebase.
 
-##### Formatting without pre-commit
+##### Formatting the code
 
-If you choose not to use pre-commit, you can take advantage of IDE extensions configured to black format or invoke
-black manually to format files and commit them.
-
-To install `flake8`, `black==19.10b0`, `isort==5.7.0` and `mypy`, please run
-```bash
-bash ./tests/run_code_style.sh install
-```
+To automate the process, we have configured the repo with [pre-commit](https://pre-commit.com/).
 
 To format files and commit changes:
+
 ```bash
-# This should autoformat the files
-bash ./tests/run_code_style.sh fmt
+# This should lint and autoformat the files
+pre-commit -a
 # If everything is OK, then commit
 git add .
 git commit -m "Added awesome feature"
 ```
 
-##### Formatting with pre-commit
+##### Formatting the code with a pre-commit hook
 
-To automate the process, we have configured the repo with [pre-commit hooks](https://pre-commit.com/) to use black to autoformat the staged files to ensure every commit complies with a style guide. This requires some setup, which is described below:
+To enable the `pre-commit` hooks follow the steps described below:
 
-1. Install pre-commit in your python environment.
-2. Run pre-commit install that configures a virtual environment to invoke black, isort and flake8 on commits.
+1. Run `pre-commit install` to configure a virtual environment to invoke linters and formatters on commits.
 
 ```bash
 pip install pre-commit
 pre-commit install
 ```
 
-3. When files are committed:
-   - If the stages files are not compliant with black, black will autoformat the staged files. If this were to happen, files should be staged and committed again. See example code below.
-   - If the staged files are not compliant with flake8, errors will be raised. These errors should be fixed and the files should be committed again. See example code below.
+2. When files are committed:
+   - If the staged files are not compliant, the tools autoformat the staged files. If this were to happen, files should be staged and committed again. See example code below.
+   - If the staged files are not compliant errors will be raised. These errors should be fixed and the files should be committed again. See example code below.
 
 ```bash
 git add .
 git commit -m "Added awesome feature"
-# DONT'T WORRY IF ERRORS ARE RAISED.
-# YOUR CODE IS NOT COMPLIANT WITH flake8, isort or black
-# Fix any flake8 errors by following their suggestions
-# isort and black will automatically format the files so they might look different, but you'll need to stage the files
+# DON'T WORRY IF ERRORS ARE RAISED.
+# YOUR CODE IS NOT COMPLIANT WITH ruff format
+# Fix any errors by following their suggestions
 # again for committing
 # After fixing any flake8 errors
 git add .
@@ -203,35 +212,37 @@ export WORLD_SIZE=2
 CUDA_VISIBLE_DEVICES="" pytest --dist=each --tx $WORLD_SIZE*popen//python=python tests/ -m distributed -vvv
 ```
 
-#### Run Mypy checks:
+#### Run Pyrefly checks:
 
-To run mypy to check the optional static type:
+To run pyrefly to check the optional static type:
 
 ```bash
-bash ./tests/run_code_style.sh mypy
+pyrefly check
 ```
 
-To change any config for specif folder, please see the file mypy.ini
+To change any config for specific folder, please see the file pyrefly.toml
 
 #### Send a PR
 
-If everything is OK, please send a Pull Request to https://github.com/pytorch/ignite
+AI tools are allowed. Read [AGENTS.md](AGENTS.md) first. We do not accept AI-generated issues or PR descriptions, automated submissions, or generated replies to reviewers.
+
+If everything is OK, please send a Pull Request to https://github.com/pytorch/ignite from your fork.
 
 If you are not familiar with creating a Pull Request, here are some guides:
 
+- https://github.com/firstcontributions/first-contributions
 - http://stackoverflow.com/questions/14680711/how-to-do-a-github-pull-request
 - https://help.github.com/articles/creating-a-pull-request/
 
 **NOTE : When sending a PR, please kindly check if the changes are required to run in the CI.**
 
 For example, typo changes in `CONTRIBUTING.md`, `README.md` are not required to run in the CI.
-So, please add `[skip ci]` in the PR title to save the resources. Ignite has setup 3 CIs.
+So, please add `[skip ci]` in the PR title to save the resources. Ignite has setup several CIs.
 
 - GitHub Actions
-- CircleCI
 - Netlify
 
-CircleCI is disabled on forked PR. So, please add
+So, please add
 
 - `[skip actions]` for the changes which are not required to run on GitHub Actions,
 - `[skip netlify]` for the changes which are not required to run on Netlify PR Preview build, or
@@ -274,6 +285,8 @@ for formatting docstrings, specially from an example of `Google style with Pytho
 - [`.. versionchanged::`] directive for adding new arguments, changing internal behaviours, fixing bugs and
 - [`.. deprecated::`] directive for deprecations.
 
+Examples: `versionadded` usage [link](https://github.com/pytorch/ignite/blob/52c69251dd9d97c32da1df0477ec3854e5702029/ignite/handlers/state_param_scheduler.py#L24), `versionchanged` usage [link](https://github.com/pytorch/ignite/blob/d2020e4e253ac1455a757c2db895c68ccfd2b958/ignite/metrics/metric.py#L281-L282)
+
 Length of line inside docstrings block must be limited to 120 characters.
 
 [`.. versionadded::`]: https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#directive-versionadded
@@ -293,6 +306,7 @@ pip install -r requirements.txt
 
 [Katex](https://katex.org/) is also needed to build the documentation.
 To install katex, you need to have [nodejs](https://nodejs.org/en/) installed.
+Optionally, we can install `nodejs/npm` using conda: `conda install nodejs`.
 Then you can install katex with [npm](https://www.npmjs.com/) or [yarn](https://yarnpkg.com/) (if installed).
 
 ```bash
@@ -347,7 +361,7 @@ should be under `.. testcode::` and expected output should be under
 
 If the floating point results are needed for assertion and the results can vary per operating systems and PyTorch versions, we could assert the results up to 4 or 6 decimal places and match the rest of the results with `...`. Learn more about `sphinx.ext.doctest` in [the official documentation](https://www.sphinx-doc.org/en/master/usage/extensions/doctest.html).
 
-To make writing doctests easy, there are some configuratons defined in `conf.py`. Search `doctest_global_setup` in [conf.py](docs/source/conf.py) to see which variables and functions are available.
+To make writing doctests easy, there are some configurations defined in `conf.py`. Search `doctest_global_setup` in [conf.py](docs/source/conf.py) to see which variables and functions are available.
 
 To run doctests locally:
 

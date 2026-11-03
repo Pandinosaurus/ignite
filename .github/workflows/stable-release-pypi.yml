@@ -8,46 +8,26 @@ jobs:
   build-publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Setup Miniconda
-        uses: conda-incubator/setup-miniconda@v2
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          miniconda-version: "latest"
-          python-version: 3.8
+          version: "latest"
+          python-version: "3.13"
+          activate-environment: true
 
       - name: Install dependencies
-        shell: bash -l {0}
         run: |
-          conda install -y pytorch torchvision cpuonly -c pytorch
-          pip install -r requirements-dev.txt
-          pip install --upgrade --no-cache-dir twine
-          python setup.py install
+          uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          uv pip install -r requirements-dev.txt
 
       - name: Build and Publish PyPI binaries
-        shell: bash -l {0}
         run: |
-          python setup.py sdist bdist_wheel
+          # workaround to fix https://github.com/pytorch/ignite/issues/2373
+          uv pip uninstall -y twine pkginfo
+          uv pip install --upgrade --no-cache-dir hatch twine 'pkginfo>=1.8.2'
+          hatch build
+          twine --version
           twine check dist/*
           TWINE_USERNAME="${{ secrets.PYPI_USER }}" TWINE_PASSWORD="${{ secrets.PYPI_TOKEN }}" twine upload --verbose dist/*
-
-  docker-build-publish:
-    name: Trigger Build and Push Docker images to Docker Hub
-    needs: build-publish
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-python@v2
-        with:
-          python-version: 3.7
-      - name: Trigger Circle-CI pipeline
-        env:
-          CIRCLE_TOKEN: ${{ secrets.CIRCLE_TOKEN }}
-        run: |
-          pip install requests
-
-          if [ $GITHUB_EVENT_NAME == 'pull_request' ]; then should_publish_docker_images=false; else should_publish_docker_images=true; fi
-          branch=$GITHUB_REF
-
-          python -u .github/workflows/trigger_circle_ci.py $should_publish_docker_images $branch

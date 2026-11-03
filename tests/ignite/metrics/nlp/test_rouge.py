@@ -1,18 +1,34 @@
 import os
 
+import filelock
+
 import nltk
 import pytest
-import rouge as pyrouge
+from . import _pyrouge as pyrouge
 import torch
 
 import ignite.distributed as idist
 from ignite.exceptions import NotComputableError
 from ignite.metrics.nlp import Rouge
-from ignite.metrics.nlp.rouge import RougeL, RougeN, compute_ngram_scores
+from ignite.metrics.nlp.rouge import compute_ngram_scores, RougeL, RougeN
 
 from . import CorpusForTest
 
-nltk.download("punkt")
+
+@pytest.fixture(scope="session", autouse=True)
+def download_nltk_punkt(tmp_path_factory):
+    root_tmp_dir = tmp_path_factory.getbasetemp().parent
+    while True:
+        try:
+            with filelock.FileLock(root_tmp_dir / "nltk_download.lock", timeout=0.2) as fn:
+                fn.acquire()
+                nltk.download("punkt")
+                nltk.download("punkt_tab")
+                fn.release()
+                break
+        except filelock._error.Timeout:
+            pass
+
 
 corpus = CorpusForTest()
 
@@ -38,7 +54,6 @@ def test_compute_ngram_scores(candidate, reference, n, expected_precision, expec
 
 
 def test_wrong_inputs():
-
     with pytest.raises(ValueError, match=r"ngram order must be greater than zero"):
         RougeN(ngram=0)
 
@@ -70,9 +85,9 @@ def test_wrong_inputs():
         (2, "abcdef", "zbdfz", (0, 0)),
     ],
 )
-def test_rouge_n_alpha(ngram, candidate, reference, expected):
+def test_rouge_n_alpha(ngram, candidate, reference, expected, available_device):
     for alpha in [0, 1, 0.3, 0.5, 0.8]:
-        rouge = RougeN(ngram=ngram, alpha=alpha)
+        rouge = RougeN(ngram=ngram, alpha=alpha, device=available_device)
         rouge.update(([candidate], [[reference]]))
         results = rouge.compute()
         assert results[f"Rouge-{ngram}-P"] == expected[0]
@@ -85,9 +100,9 @@ def test_rouge_n_alpha(ngram, candidate, reference, expected):
 
 
 @pytest.mark.parametrize(
-    "candidates, references", [corpus.sample_1, corpus.sample_2, corpus.sample_3, corpus.sample_4, corpus.sample_5,],
+    "candidates, references", [corpus.sample_1, corpus.sample_2, corpus.sample_3, corpus.sample_4, corpus.sample_5]
 )
-def test_rouge_metrics(candidates, references):
+def test_rouge_metrics(candidates, references, available_device):
     for multiref in ["average", "best"]:
         # PERL 1.5.5 reference
         apply_avg = multiref == "average"
@@ -109,7 +124,8 @@ def test_rouge_metrics(candidates, references):
 
         lower_split_candidates = [candidate.lower().split() for candidate in candidates]
 
-        m = Rouge(variants=[1, 2, 4, "L"], multiref=multiref, alpha=0.5)
+        m = Rouge(variants=[1, 2, 4, "L"], multiref=multiref, alpha=0.5, device=available_device)
+        assert m._device == torch.device(available_device)
         m.update((lower_split_candidates, lower_split_references))
         results = m.compute()
 
@@ -120,7 +136,6 @@ def test_rouge_metrics(candidates, references):
 
 
 def _test_distrib_integration(device):
-
     from ignite.engine import Engine
 
     rank = idist.get_rank()
@@ -175,7 +190,6 @@ def _test_distrib_integration(device):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
 def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
-
     device = idist.device()
     _test_distrib_integration(device)
 
@@ -183,7 +197,6 @@ def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
-
     device = idist.device()
     _test_distrib_integration(device)
 
@@ -192,7 +205,6 @@ def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
 @pytest.mark.skipif(not idist.has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_distrib_hvd(gloo_hvd_executor):
-
     device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
     nproc = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
 
@@ -203,7 +215,6 @@ def test_distrib_hvd(gloo_hvd_executor):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
-
     device = idist.device()
     _test_distrib_integration(device)
 
@@ -212,7 +223,6 @@ def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("GPU_MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_nccl_gpu(distributed_context_multi_node_nccl):
-
     device = idist.device()
     _test_distrib_integration(device)
 

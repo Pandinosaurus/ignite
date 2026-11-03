@@ -1,5 +1,6 @@
 from collections import Counter
-from typing import Any, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 __all__ = ["ngrams", "lcs", "modified_precision"]
 
@@ -51,7 +52,7 @@ def lcs(seq_a: Sequence[Any], seq_b: Sequence[Any]) -> int:
     return dp[m][n]
 
 
-def modified_precision(references: Sequence[Sequence[Any]], candidate: Any, n: int) -> Tuple[int, int]:
+def modified_precision(references: Sequence[Sequence[Any]], candidate: Any, n: int) -> tuple[int, int]:
     """
     Compute the modified precision
 
@@ -63,7 +64,7 @@ def modified_precision(references: Sequence[Sequence[Any]], candidate: Any, n: i
 
     More details can be found in `Papineni et al. 2002`__.
 
-    __ https://www.aclweb.org/anthology/P02-1040.pdf
+    __ https://aclanthology.org/P02-1040
 
     Args:
         references: list of references R

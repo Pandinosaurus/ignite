@@ -1,5 +1,5 @@
 import numbers
-from typing import Callable, Optional, Sequence, Tuple, Union
+from collections.abc import Callable, Sequence
 
 import torch
 
@@ -13,7 +13,7 @@ __all__ = ["ConfusionMatrix", "mIoU", "IoU", "DiceCoefficient", "cmAccuracy", "c
 class ConfusionMatrix(Metric):
     """Calculates confusion matrix for multi-class data.
 
-    - ``update`` must receive output of the form ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y}``.
+    - ``update`` must receive output of the form ``(y_pred, y)``.
     - `y_pred` must contain logits and has the following shape (batch_size, num_classes, ...).
       If you are doing binary classification, see Note for an example on how to get this.
     - `y` should have the following shape (batch_size, ...) and contains ground-truth class indices
@@ -34,6 +34,9 @@ class ConfusionMatrix(Metric):
         device: specifies which device updates are accumulated on. Setting the metric's
             device to be the same as your ``update`` arguments ensures the ``update`` method is non-blocking. By
             default, CPU.
+        skip_unrolling: specifies whether output should be unrolled before being fed to update method. Should be
+            true for multi-output model, for example, if ``y_pred`` contains multi-output as ``(y_pred_a, y_pred_b)``
+            Alternatively, ``output_transform`` can be used to handle this.
 
     Note:
         The confusion matrix is formatted such that columns are predictions and rows are targets.
@@ -47,12 +50,17 @@ class ConfusionMatrix(Metric):
 
     Examples:
 
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
+
         .. testcode:: 1
 
             metric = ConfusionMatrix(num_classes=3)
             metric.attach(default_evaluator, 'cm')
-            y_true = torch.Tensor([0, 1, 0, 1, 2]).long()
-            y_pred = torch.Tensor([
+            y_true = torch.tensor([0, 1, 0, 1, 2])
+            y_pred = torch.tensor([
                 [0.0, 1.0, 0.0],
                 [0.0, 1.0, 0.0],
                 [1.0, 0.0, 0.0],
@@ -75,16 +83,17 @@ class ConfusionMatrix(Metric):
         .. testcode:: 2
 
             def binary_one_hot_output_transform(output):
+                from ignite import utils
                 y_pred, y = output
                 y_pred = torch.sigmoid(y_pred).round().long()
-                y_pred = ignite.utils.to_onehot(y_pred, 2)
+                y_pred = utils.to_onehot(y_pred, 2)
                 y = y.long()
                 return y_pred, y
 
             metric = ConfusionMatrix(num_classes=2, output_transform=binary_one_hot_output_transform)
             metric.attach(default_evaluator, 'cm')
-            y_true = torch.Tensor([0, 1, 0, 1, 0]).long()
-            y_pred = torch.Tensor([0, 0, 1, 1, 0])
+            y_true = torch.tensor([0, 1, 0, 1, 0])
+            y_pred = torch.tensor([0, 0, 1, 1, 0])
             state = default_evaluator.run([[y_pred, y_true]])
             print(state.metrics['cm'])
 
@@ -92,14 +101,20 @@ class ConfusionMatrix(Metric):
 
             tensor([[2, 1],
                     [1, 1]])
+
+    .. versionchanged:: 0.5.1
+        ``skip_unrolling`` argument is added.
     """
+
+    _state_dict_all_req_keys = ("confusion_matrix", "_num_examples")
 
     def __init__(
         self,
         num_classes: int,
-        average: Optional[str] = None,
+        average: str | None = None,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
+        skip_unrolling: bool = True,
     ):
         if average is not None and average not in ("samples", "recall", "precision"):
             raise ValueError("Argument average can None or one of 'samples', 'recall', 'precision'")
@@ -110,7 +125,7 @@ class ConfusionMatrix(Metric):
         self.num_classes = num_classes
         self._num_examples = 0
         self.average = average
-        super(ConfusionMatrix, self).__init__(output_transform=output_transform, device=device)
+        super().__init__(output_transform=output_transform, device=device, skip_unrolling=skip_unrolling)
 
     @reinit__is_reduced
     def reset(self) -> None:
@@ -137,7 +152,7 @@ class ConfusionMatrix(Metric):
             )
 
         y_shape = y.shape
-        y_pred_shape = y_pred.shape  # type: Tuple[int, ...]
+        y_pred_shape: tuple[int, ...] = y_pred.shape
 
         if y.ndimension() + 1 == y_pred.ndimension():
             y_pred_shape = (y_pred_shape[0],) + y_pred_shape[2:]
@@ -161,7 +176,7 @@ class ConfusionMatrix(Metric):
         y_pred = y_pred[target_mask]
 
         indices = self.num_classes * y + y_pred
-        m = torch.bincount(indices, minlength=self.num_classes ** 2).reshape(self.num_classes, self.num_classes)
+        m = torch.bincount(indices, minlength=self.num_classes**2).reshape(self.num_classes, self.num_classes)
         self.confusion_matrix += m.to(self.confusion_matrix)
 
     @sync_all_reduce("confusion_matrix", "_num_examples")
@@ -187,7 +202,7 @@ class ConfusionMatrix(Metric):
             raise ValueError("Argument average should be one of 'samples', 'recall', 'precision'")
 
 
-def IoU(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> MetricsLambda:
+def IoU(cm: ConfusionMatrix, ignore_index: int | None = None) -> MetricsLambda:
     r"""Calculates Intersection over Union using :class:`~ignite.metrics.confusion_matrix.ConfusionMatrix` metric.
 
     .. math:: \text{J}(A, B) = \frac{ \lvert A \cap B \rvert }{ \lvert A \cup B \rvert }
@@ -201,13 +216,18 @@ def IoU(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> MetricsLambd
 
     Examples:
 
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
+
         .. testcode::
 
             cm = ConfusionMatrix(num_classes=3)
             metric = IoU(cm)
             metric.attach(default_evaluator, 'iou')
-            y_true = torch.Tensor([0, 1, 0, 1, 2]).long()
-            y_pred = torch.Tensor([
+            y_true = torch.tensor([0, 1, 0, 1, 2])
+            y_pred = torch.tensor([
                 [0.0, 1.0, 0.0],
                 [0.0, 1.0, 0.0],
                 [1.0, 0.0, 0.0],
@@ -229,13 +249,15 @@ def IoU(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> MetricsLambd
 
     if ignore_index is not None:
         if not (isinstance(ignore_index, numbers.Integral) and 0 <= ignore_index < cm.num_classes):
-            raise ValueError(f"ignore_index should be non-negative integer, but given {ignore_index}")
+            raise ValueError(
+                f"ignore_index should be integer and in the range of [0, {cm.num_classes}), but given {ignore_index}"
+            )
 
     # Increase floating point precision and pass to CPU
-    cm = cm.type(torch.DoubleTensor)
-    iou = cm.diag() / (cm.sum(dim=1) + cm.sum(dim=0) - cm.diag() + 1e-15)  # type: MetricsLambda
+    cm = cm.to(torch.double)
+    iou: MetricsLambda = cm.diag() / (cm.sum(dim=1) + cm.sum(dim=0) - cm.diag() + 1e-15)
     if ignore_index is not None:
-        ignore_idx = ignore_index  # type: int  # used due to typing issues with mympy
+        ignore_idx: int = ignore_index  # used due to typing issues with mympy
 
         def ignore_index_fn(iou_vector: torch.Tensor) -> torch.Tensor:
             if ignore_idx >= len(iou_vector):
@@ -249,7 +271,7 @@ def IoU(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> MetricsLambd
         return iou
 
 
-def mIoU(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> MetricsLambda:
+def mIoU(cm: ConfusionMatrix, ignore_index: int | None = None) -> MetricsLambda:
     """Calculates mean Intersection over Union using :class:`~ignite.metrics.confusion_matrix.ConfusionMatrix` metric.
 
     Args:
@@ -261,13 +283,18 @@ def mIoU(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> MetricsLamb
 
     Examples:
 
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
+
         .. testcode::
 
             cm = ConfusionMatrix(num_classes=3)
             metric = mIoU(cm, ignore_index=0)
             metric.attach(default_evaluator, 'miou')
-            y_true = torch.Tensor([0, 1, 0, 1, 2]).long()
-            y_pred = torch.Tensor([
+            y_true = torch.tensor([0, 1, 0, 1, 2])
+            y_pred = torch.tensor([
                 [0.0, 1.0, 0.0],
                 [0.0, 1.0, 0.0],
                 [1.0, 0.0, 0.0],
@@ -281,7 +308,7 @@ def mIoU(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> MetricsLamb
 
             0.24999...
     """
-    iou = IoU(cm=cm, ignore_index=ignore_index).mean()  # type: MetricsLambda
+    iou: MetricsLambda = IoU(cm=cm, ignore_index=ignore_index).mean()
     return iou
 
 
@@ -295,8 +322,8 @@ def cmAccuracy(cm: ConfusionMatrix) -> MetricsLambda:
         MetricsLambda
     """
     # Increase floating point precision and pass to CPU
-    cm = cm.type(torch.DoubleTensor)
-    accuracy = cm.diag().sum() / (cm.sum() + 1e-15)  # type: MetricsLambda
+    cm = cm.to(torch.double)
+    accuracy: MetricsLambda = cm.diag().sum() / (cm.sum() + 1e-15)
     return accuracy
 
 
@@ -311,10 +338,10 @@ def cmPrecision(cm: ConfusionMatrix, average: bool = True) -> MetricsLambda:
     """
 
     # Increase floating point precision and pass to CPU
-    cm = cm.type(torch.DoubleTensor)
-    precision = cm.diag() / (cm.sum(dim=0) + 1e-15)  # type: MetricsLambda
+    cm = cm.to(torch.double)
+    precision: MetricsLambda = cm.diag() / (cm.sum(dim=0) + 1e-15)
     if average:
-        mean = precision.mean()  # type: MetricsLambda
+        mean: MetricsLambda = precision.mean()
         return mean
     return precision
 
@@ -330,15 +357,15 @@ def cmRecall(cm: ConfusionMatrix, average: bool = True) -> MetricsLambda:
     """
 
     # Increase floating point precision and pass to CPU
-    cm = cm.type(torch.DoubleTensor)
-    recall = cm.diag() / (cm.sum(dim=1) + 1e-15)  # type: MetricsLambda
+    cm = cm.to(torch.double)
+    recall: MetricsLambda = cm.diag() / (cm.sum(dim=1) + 1e-15)
     if average:
-        mean = recall.mean()  # type: MetricsLambda
+        mean: MetricsLambda = recall.mean()
         return mean
     return recall
 
 
-def DiceCoefficient(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> MetricsLambda:
+def DiceCoefficient(cm: ConfusionMatrix, ignore_index: int | None = None) -> MetricsLambda:
     """Calculates Dice Coefficient for a given :class:`~ignite.metrics.confusion_matrix.ConfusionMatrix` metric.
 
     Args:
@@ -347,13 +374,18 @@ def DiceCoefficient(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> 
 
     Examples:
 
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
+
         .. testcode::
 
             cm = ConfusionMatrix(num_classes=3)
             metric = DiceCoefficient(cm, ignore_index=0)
             metric.attach(default_evaluator, 'dice')
-            y_true = torch.Tensor([0, 1, 0, 1, 2]).long()
-            y_pred = torch.Tensor([
+            y_true = torch.tensor([0, 1, 0, 1, 2])
+            y_pred = torch.tensor([
                 [0.0, 1.0, 0.0],
                 [0.0, 1.0, 0.0],
                 [1.0, 0.0, 0.0],
@@ -373,14 +405,16 @@ def DiceCoefficient(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> 
 
     if ignore_index is not None:
         if not (isinstance(ignore_index, numbers.Integral) and 0 <= ignore_index < cm.num_classes):
-            raise ValueError(f"ignore_index should be non-negative integer, but given {ignore_index}")
+            raise ValueError(
+                f"ignore_index should be integer and in the range of [0, {cm.num_classes}), but given {ignore_index}"
+            )
 
     # Increase floating point precision and pass to CPU
-    cm = cm.type(torch.DoubleTensor)
-    dice = 2.0 * cm.diag() / (cm.sum(dim=1) + cm.sum(dim=0) + 1e-15)  # type: MetricsLambda
+    cm = cm.to(torch.double)
+    dice: MetricsLambda = 2.0 * cm.diag() / (cm.sum(dim=1) + cm.sum(dim=0) + 1e-15)
 
     if ignore_index is not None:
-        ignore_idx = ignore_index  # type: int  # used due to typing issues with mympy
+        ignore_idx: int = ignore_index  # used due to typing issues with mympy
 
         def ignore_index_fn(dice_vector: torch.Tensor) -> torch.Tensor:
             if ignore_idx >= len(dice_vector):
@@ -396,7 +430,7 @@ def DiceCoefficient(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> 
         return dice
 
 
-def JaccardIndex(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> MetricsLambda:
+def JaccardIndex(cm: ConfusionMatrix, ignore_index: int | None = None) -> MetricsLambda:
     r"""Calculates the Jaccard Index using :class:`~ignite.metrics.confusion_matrix.ConfusionMatrix` metric.
     Implementation is based on :meth:`~ignite.metrics.IoU`.
 
@@ -411,13 +445,18 @@ def JaccardIndex(cm: ConfusionMatrix, ignore_index: Optional[int] = None) -> Met
 
     Examples:
 
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
+
         .. testcode::
 
             cm = ConfusionMatrix(num_classes=3)
             metric = JaccardIndex(cm, ignore_index=0)
             metric.attach(default_evaluator, 'jac')
-            y_true = torch.Tensor([0, 1, 0, 1, 2]).long()
-            y_pred = torch.Tensor([
+            y_true = torch.tensor([0, 1, 0, 1, 2])
+            y_pred = torch.tensor([
                 [0.0, 1.0, 0.0],
                 [0.0, 1.0, 0.0],
                 [1.0, 0.0, 0.0],

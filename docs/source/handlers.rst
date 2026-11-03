@@ -1,8 +1,8 @@
 ignite.handlers
 ===============
 
-Complete list of handlers
--------------------------
+Complete list of generic handlers
+----------------------------------
 
 .. currentmodule:: ignite.handlers
 
@@ -10,19 +10,20 @@ Complete list of handlers
     :nosignatures:
     :toctree: generated
 
-    checkpoint.Checkpoint
+    Checkpoint
+    checkpoint.CheckpointEvents
     DiskSaver
-    checkpoint.ModelCheckpoint
-    ema_handler.EMAHandler
-    early_stopping.EarlyStopping
-    lr_finder.FastaiLRFinder
-    terminate_on_nan.TerminateOnNan
+    ModelCheckpoint
+    EMAHandler
+    EarlyStopping
+    FastaiLRFinder
+    TerminateOnNan
     TimeLimit
-    time_profilers.BasicTimeProfiler
-    time_profilers.HandlersTimeProfiler
-    timing.Timer
+    BasicTimeProfiler
+    HandlersTimeProfiler
+    Timer
     global_step_from_engine
-    stores.EpochOutputStore
+    EpochOutputStore
 
 .. autosummary::
     :nosignatures:
@@ -33,7 +34,78 @@ Complete list of handlers
     param_scheduler.ParamScheduler
     state_param_scheduler.StateParamScheduler
 
+Interfaces
+----------
+
+.. currentmodule:: ignite.base.mixins
+
+.. autosummary::
+    :nosignatures:
+    :toctree: generated
+
+    ResettableHandler
+
+
+Loggers
+--------
+
+.. currentmodule:: ignite.handlers
+
+.. autosummary::
+    :nosignatures:
+    :toctree: generated
+    :recursive:
+
+    base_logger
+    clearml_logger
+    mlflow_logger
+    neptune_logger
+    polyaxon_logger
+    tensorboard_logger
+    tqdm_logger
+
+    visdom_logger
+    wandb_logger
+    fbresearch_logger
+
+.. seealso::
+
+    Below are a comprehensive list of examples of various loggers.
+
+    * See `tensorboardX mnist example <https://github.com/pytorch/ignite/blob/master/examples/mnist/mnist_with_tensorboard_logger.py>`_
+      and `CycleGAN and EfficientNet notebooks <https://github.com/pytorch/ignite/tree/master/examples/notebooks>`_ for detailed usage.
+
+    * See `visdom mnist example <https://github.com/pytorch/ignite/blob/master/examples/mnist/mnist_with_visdom_logger.py>`_ for detailed usage.
+
+    * See `neptune mnist example <https://github.com/pytorch/ignite/blob/master/examples/mnist/mnist_with_neptune_logger.py>`_ for detailed usage.
+
+    * See `tqdm mnist example <https://github.com/pytorch/ignite/blob/master/examples/mnist/mnist_with_tqdm_logger.py>`_ for detailed usage.
+
+    * See `wandb mnist example <https://github.com/pytorch/ignite/blob/master/examples/mnist/mnist_with_wandb_logger.py>`_ for detailed usage.
+
+    * See `clearml mnist example <https://github.com/pytorch/ignite/blob/master/examples/mnist/mnist_with_clearml_logger.py>`_ for detailed usage.
+
+
 .. _param-scheduler-label:
+
+Logger setup helpers
+---------------------
+.. automodule:: ignite.handlers.logger_utils
+
+.. currentmodule:: ignite.handlers.logger_utils
+
+.. autosummary::
+    :nosignatures:
+    :toctree: generated
+
+    setup_tb_logging
+    setup_visdom_logging
+    setup_mlflow_logging
+    setup_neptune_logging
+    setup_wandb_logging
+    setup_plx_logging
+    setup_clearml_logging
+    setup_trains_logging
 
 Parameter scheduler
 -------------------
@@ -45,6 +117,7 @@ Parameter scheduler
     :toctree: generated
 
     BaseParamScheduler
+    BatchSizeScheduler
     ConcatScheduler
     CosineAnnealingScheduler
     CyclicalScheduler
@@ -53,6 +126,7 @@ Parameter scheduler
     ParamGroupScheduler
     ParamScheduler
     PiecewiseLinear
+    ReduceLROnPlateauScheduler
     create_lr_scheduler_with_warmup
 
 State Parameter scheduler
@@ -379,3 +453,42 @@ Concatenate with torch schedulers
 
 
 .. image:: ./_static/img/schedulers/concat_linear_exp_step_lr.png
+
+
+Example with :class:`ignite.handlers.param_scheduler.ReduceLROnPlateauScheduler`
+`````````````````````````````````````````````````````````````````````````````````````
+
+.. code-block:: python
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from ignite.handlers import ReduceLROnPlateauScheduler
+
+    metric_values = [0.7, 0.78, 0.81, 0.82, 0.82, 0.83, 0.80, 0.81, 0.84, 0.78]
+    num_events = 10
+    init_lr = 0.1
+
+    lr_values = np.array(ReduceLROnPlateauScheduler.simulate_values(
+        num_events, metric_values, init_lr,
+        factor=0.5, patience=1, mode='max', threshold=0.01, threshold_mode='abs'
+        )
+    )
+
+    plt.figure(figsize=(15, 5))
+    plt.suptitle("ReduceLROnPlateauScheduler")
+    plt.subplot(121)
+    plt.plot(lr_values[:, 1], label="learning rate")
+    plt.xticks(lr_values[:, 0])
+    plt.xlabel("events")
+    plt.ylabel("values")
+    plt.legend()
+
+    plt.subplot(122)
+    plt.plot(metric_values, label="metric")
+    plt.xticks(lr_values[:, 0])
+    plt.xlabel("events")
+    plt.ylabel("values")
+    plt.legend()
+
+
+.. image:: ./_static/img/schedulers/reduce_lr_on_plateau_example.png

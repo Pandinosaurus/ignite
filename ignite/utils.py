@@ -1,12 +1,17 @@
+from __future__ import annotations
+
 import collections.abc as collections
+import copy
 import functools
 import hashlib
 import logging
+import numbers
 import random
 import shutil
 import warnings
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, TextIO, Tuple, Type, TypeVar, Union, cast
+from collections.abc import Callable
+from typing import Any, cast, TextIO, TypeVar
 
 import torch
 
@@ -14,6 +19,7 @@ __all__ = [
     "convert_tensor",
     "apply_to_tensor",
     "apply_to_type",
+    "_to_str_list",
     "to_onehot",
     "setup_logger",
     "manual_seed",
@@ -22,10 +28,10 @@ __all__ = [
 
 
 def convert_tensor(
-    x: Union[torch.Tensor, collections.Sequence, collections.Mapping, str, bytes],
-    device: Optional[Union[str, torch.device]] = None,
+    x: torch.Tensor | collections.Sequence | collections.Mapping | str | bytes,
+    device: str | torch.device | None = None,
     non_blocking: bool = False,
-) -> Union[torch.Tensor, collections.Sequence, collections.Mapping, str, bytes]:
+) -> torch.Tensor | collections.Sequence | collections.Mapping | str | bytes:
     """Move tensors to relevant device.
 
     Args:
@@ -42,8 +48,8 @@ def convert_tensor(
 
 
 def apply_to_tensor(
-    x: Union[torch.Tensor, collections.Sequence, collections.Mapping, str, bytes], func: Callable
-) -> Union[torch.Tensor, collections.Sequence, collections.Mapping, str, bytes]:
+    x: torch.Tensor | collections.Sequence | collections.Mapping | str | bytes, func: Callable
+) -> torch.Tensor | collections.Sequence | collections.Mapping | str | bytes:
     """Apply a function on a tensor or mapping, or sequence of tensors.
 
     Args:
@@ -54,10 +60,10 @@ def apply_to_tensor(
 
 
 def apply_to_type(
-    x: Union[Any, collections.Sequence, collections.Mapping, str, bytes],
-    input_type: Union[Type, Tuple[Type[Any], Any]],
+    x: Any | collections.Sequence | collections.Mapping | str | bytes,
+    input_type: type | tuple[type[Any], Any],
     func: Callable,
-) -> Union[Any, collections.Sequence, collections.Mapping, str, bytes]:
+) -> Any | collections.Sequence | collections.Mapping | str | bytes:
     """Apply a function on an object of `input_type` or mapping, or sequence of objects of `input_type`.
 
     Args:
@@ -70,12 +76,163 @@ def apply_to_type(
     if isinstance(x, (str, bytes)):
         return x
     if isinstance(x, collections.Mapping):
-        return cast(Callable, type(x))({k: apply_to_type(sample, input_type, func) for k, sample in x.items()})
+        # Follow PyTorch's mapping handling:
+        # https://github.com/pytorch/pytorch/blob/ba56102387ef21a3b04b357e5b183d48f0afefc7/torch/utils/data/_utils/collate.py#L165-L194
+        try:
+            if isinstance(x, collections.MutableMapping):
+                # The mapping type may have extra properties, so we can't just
+                # use `type(x)(...)` to create the new mapping.
+                # Create a clone and update it if the mapping type is mutable.
+                clone = copy.copy(x)
+                clone.update({k: apply_to_type(sample, input_type, func) for k, sample in x.items()})
+                return clone
+            else:
+                return cast(Callable, type(x))({k: apply_to_type(sample, input_type, func) for k, sample in x.items()})
+        except TypeError:
+            # The mapping type may not support `copy()` / `update(mapping)`
+            # or `__init__(iterable)`.
+            return {k: apply_to_type(sample, input_type, func) for k, sample in x.items()}
     if isinstance(x, tuple) and hasattr(x, "_fields"):  # namedtuple
         return cast(Callable, type(x))(*(apply_to_type(sample, input_type, func) for sample in x))
     if isinstance(x, collections.Sequence):
         return cast(Callable, type(x))([apply_to_type(sample, input_type, func) for sample in x])
     raise TypeError((f"x must contain {input_type}, dicts or lists; found {type(x)}"))
+
+
+def _tree_map(
+    func: Callable, x: Any | collections.Sequence | collections.Mapping, key: int | str | None = None
+) -> Any | collections.Sequence | collections.Mapping:
+    if isinstance(x, collections.Mapping):
+        return cast(Callable, type(x))({k: _tree_map(func, sample, key=k) for k, sample in x.items()})
+    if isinstance(x, tuple) and hasattr(x, "_fields"):  # namedtuple
+        return cast(Callable, type(x))(*(_tree_map(func, sample) for sample in x))
+    if isinstance(x, collections.Sequence):
+        return cast(Callable, type(x))([_tree_map(func, sample, key=i) for i, sample in enumerate(x)])
+    return func(x, key=key)
+
+
+def _to_str_list(data: Any) -> list[str]:
+    """
+    Recursively flattens and formats complex data structures, including keys for
+    dictionaries, into a list of human-readable strings.
+
+    This function processes nested dictionaries, lists, tuples, numbers, and
+    PyTorch tensors, formatting numbers to four decimal places and handling
+    tensors with special formatting rules. It's particularly useful for logging,
+    debugging, or any scenario where a human-readable representation of complex,
+    nested data structures is required.
+
+    The function handles the following types:
+
+    - Numbers: Formatted to four decimal places.
+    - PyTorch tensors:
+        - Scalars are formatted to four decimal places.
+        - 1D tensors with more than 10 elements show the first 10 elements
+          followed by an ellipsis.
+        - 1D tensors with 10 or fewer elements are fully listed.
+        - Multi-dimensional tensors display their shape.
+    - Dictionaries: Each key-value pair is included in the output with the key
+      as a prefix.
+    - Lists and tuples: Flattened and included in the output. Empty lists/tuples are represented
+      by an empty string.
+    - None values: Represented by an empty string.
+
+    Args:
+        data: The input data to be flattened and formatted. It can be a nested
+            combination of dictionaries, lists, tuples, numbers, and PyTorch
+            tensors.
+
+    Returns:
+        A list of formatted strings, each representing a part of the input data
+        structure.
+    """
+    formatted_items: list[str] = []
+
+    def format_item(item: Any, prefix: str = "") -> str | None:
+        if isinstance(item, numbers.Number):
+            return f"{prefix}{item:.4f}"
+        elif torch.is_tensor(item):
+            if item.dim() == 0:
+                return f"{prefix}{item.item():.4f}"  # Format scalar tensor without brackets
+            elif item.dim() == 1 and item.size(0) > 10:
+                return f"{prefix}[" + ", ".join(f"{x.item():.4f}" for x in item[:10]) + ", ...]"
+            elif item.dim() == 1:
+                return f"{prefix}[" + ", ".join(f"{x.item():.4f}" for x in item) + "]"
+            else:
+                return f"{prefix}Shape{list(item.shape)}"
+        elif isinstance(item, dict):
+            for key, value in item.items():
+                formatted_value = format_item(value, f"{key}: ")
+                if formatted_value is not None:
+                    formatted_items.append(formatted_value)
+        elif isinstance(item, (list, tuple)):
+            if not item:
+                if prefix:
+                    formatted_items.append(f"{prefix}")
+            else:
+                values = [format_item(x) for x in item]
+                values_str = [v for v in values if v is not None]
+                if values_str:
+                    formatted_items.append(f"{prefix}" + ", ".join(values_str))
+        elif item is None:
+            if prefix:
+                formatted_items.append(f"{prefix}")
+        return None
+
+    # Directly handle single numeric values
+    if isinstance(data, numbers.Number):
+        return [f"{data:.4f}"]
+
+    format_item(data)
+    return formatted_items
+
+
+class _CollectionItem:
+    types_as_collection_item: tuple = (int, float, torch.Tensor)
+
+    def __init__(self, collection: dict | list, key: int | str) -> None:
+        if not isinstance(collection, (dict, list)):
+            raise TypeError(
+                f"Input type is expected to be a mapping or list, but got {type(collection)} for input key '{key}'."
+            )
+        if isinstance(collection, list) and isinstance(key, str):
+            raise ValueError("Key should be int for collection of type list")
+
+        self.collection = collection
+        self.key = key
+
+    def load_value(self, value: Any) -> None:
+        self.collection[self.key] = value  # type: ignore[index]
+
+    def value(self) -> Any:
+        return self.collection[self.key]  # type: ignore[index]
+
+    @staticmethod
+    def wrap(object: dict | list, key: int | str, value: Any) -> Any | "_CollectionItem":
+        return (
+            _CollectionItem(object, key)
+            if value is None or isinstance(value, _CollectionItem.types_as_collection_item)
+            else value
+        )
+
+
+def _tree_apply2(
+    func: Callable,
+    x: Any | list | dict,
+    y: Any | collections.Sequence | collections.Mapping,
+) -> None:
+    if isinstance(x, dict) and isinstance(y, collections.Mapping):
+        for k, v in x.items():
+            if k not in y:
+                raise ValueError(f"Key '{k}' from x is not found in y: {y.keys()}")
+            _tree_apply2(func, _CollectionItem.wrap(x, k, v), y[k])
+    elif isinstance(x, list) and isinstance(y, collections.Sequence):
+        if len(x) != len(y):
+            raise ValueError(f"Size of y: {len(y)} does not match the size of x: '{len(x)}'")
+        for i, (v1, v2) in enumerate(zip(x, y)):
+            _tree_apply2(func, _CollectionItem.wrap(x, i, v1), v2)
+    else:
+        return func(x, y)
 
 
 def to_onehot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -96,13 +253,14 @@ def to_onehot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
 
 
 def setup_logger(
-    name: Optional[str] = "ignite",
+    name: str | None = "ignite",
     level: int = logging.INFO,
-    stream: Optional[TextIO] = None,
+    stream: TextIO | None = None,
     format: str = "%(asctime)s %(name)s %(levelname)s: %(message)s",
-    filepath: Optional[str] = None,
-    distributed_rank: Optional[int] = None,
+    filepath: str | None = None,
+    distributed_rank: int | None = None,
     reset: bool = False,
+    encoding: str | None = "utf-8",
 ) -> logging.Logger:
     """Setups logger: name, level, format etc.
 
@@ -115,6 +273,7 @@ def setup_logger(
         distributed_rank: Optional, rank in distributed configuration to avoid logger setup for workers.
             If None, distributed_rank is initialized to the rank of process.
         reset: if True, reset an existing logger rather than keep format, handlers, and level.
+        encoding: open the file with the encoding. By default, 'utf-8'.
 
     Returns:
         logging.Logger
@@ -168,6 +327,9 @@ def setup_logger(
 
     .. versionchanged:: 0.4.5
         Added ``reset`` parameter.
+
+    .. versionchanged:: 0.5.1
+        Argument ``encoding`` added to correctly handle special characters in the file, default "utf-8".
     """
     # check if the logger already exists
     existing = name is None or name in logging.root.manager.loggerDict
@@ -182,13 +344,11 @@ def setup_logger(
 
     # Remove previous handlers
     if distributed_rank > 0 or reset:
-
         if logger.hasHandlers():
             for h in list(logger.handlers):
                 logger.removeHandler(h)
 
     if distributed_rank > 0:
-
         # Add null handler to avoid multiple parallel messages
         logger.addHandler(logging.NullHandler())
 
@@ -207,7 +367,7 @@ def setup_logger(
         logger.addHandler(ch)
 
         if filepath is not None:
-            fh = logging.FileHandler(filepath)
+            fh = logging.FileHandler(filepath, encoding=encoding)
             fh.setLevel(level)
             fh.setFormatter(formatter)
             logger.addHandler(fh)
@@ -236,9 +396,6 @@ def manual_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
 
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
     try:
         import torch_xla.core.xla_model as xm
 
@@ -255,9 +412,8 @@ def manual_seed(seed: int) -> None:
 
 
 def deprecated(
-    deprecated_in: str, removed_in: str = "", reasons: Tuple[str, ...] = (), raise_exception: bool = False
+    deprecated_in: str, removed_in: str = "", reasons: tuple[str, ...] = (), raise_exception: bool = False
 ) -> Callable:
-
     F = TypeVar("F", bound=Callable[..., Any])
 
     def decorator(func: F) -> F:
@@ -269,7 +425,7 @@ def deprecated(
         )
 
         @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Dict[str, Any]) -> Callable:
+        def wrapper(*args: Any, **kwargs: dict[str, Any]) -> Callable:
             if raise_exception:
                 raise DeprecationWarning(deprecation_warning)
             warnings.warn(deprecation_warning, DeprecationWarning, stacklevel=2)
@@ -285,7 +441,7 @@ def deprecated(
     return decorator
 
 
-def hash_checkpoint(checkpoint_path: Union[str, Path], output_dir: Union[str, Path],) -> Tuple[Path, str]:
+def hash_checkpoint(checkpoint_path: str | Path, output_dir: str | Path) -> tuple[Path, str]:
     """
     Hash the checkpoint file in the format of ``<filename>-<hash>.<ext>``
     to be used with ``check_hash`` of :func:`torch.hub.load_state_dict_from_url`.
@@ -298,7 +454,7 @@ def hash_checkpoint(checkpoint_path: Union[str, Path], output_dir: Union[str, Pa
     Returns:
         Path to the hashed checkpoint file, the first 8 digits of SHA256 hash.
 
-    .. versionadded:: 0.5.0
+    .. versionadded:: 0.4.8
     """
 
     if isinstance(checkpoint_path, str):

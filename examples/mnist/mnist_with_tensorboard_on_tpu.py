@@ -1,18 +1,18 @@
 """
- MNIST example with training and validation monitoring using Tensorboard on TPU
- Requirements:
-    - PyTorch >= 1.5
-    - PyTorch XLA >= 1.5
-    - Tensorboard: `pip install tensorflow` (or just install tensorboard without the rest of tensorflow)
- Usage:
-    Start tensorboard:
-    ```bash
-    tensorboard --logdir=/tmp/tensorboard_logs/
-    ```
-    Run the example:
-    ```bash
-    python mnist_with_tensorboard_on_tpu.py --log_dir=/tmp/tensorboard_logs
-    ```
+MNIST example with training and validation monitoring using Tensorboard on TPU
+Requirements:
+   - PyTorch >= 1.5
+   - PyTorch XLA >= 1.5
+   - Tensorboard: `pip install tensorflow` (or just install tensorboard without the rest of tensorflow)
+Usage:
+   Start tensorboard:
+   ```bash
+   tensorboard --logdir=/tmp/tensorboard_logs/
+   ```
+   Run the example:
+   ```bash
+   python mnist_with_tensorboard_on_tpu.py --log_dir=/tmp/tensorboard_logs
+   ```
 """
 
 from argparse import ArgumentParser
@@ -25,13 +25,13 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.datasets import MNIST
 from torchvision.transforms import Compose, Normalize, ToTensor
 
-from ignite.engine import Events, create_supervised_evaluator, create_supervised_trainer
+from ignite.engine import create_supervised_evaluator, create_supervised_trainer, Events
 from ignite.metrics import Accuracy, Loss, RunningAverage
 
 try:
     import torch_xla.core.xla_model as xm
 except ImportError:
-    raise RuntimeError(
+    raise ModuleNotFoundError(
         "In order to run PyTorch on TPU we need to install PyTorch XLA:"
         "\n\t- curl https://raw.githubusercontent.com/pytorch/xla/master/contrib/scripts/env-setup.py -o xla-setup.py"
         "\n\t- python xla-setup.py --version 1.5"
@@ -40,7 +40,7 @@ except ImportError:
 
 class Net(nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
+        super().__init__()
         self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
         self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
         self.conv2_drop = nn.Dropout2d()
@@ -84,7 +84,7 @@ def run(train_batch_size, val_batch_size, epochs, lr, momentum, log_interval, lo
 
     # Create trainer and evaluator
     trainer = create_supervised_trainer(
-        model, optimizer, criterion, device=device, output_transform=lambda x, y, y_pred, loss: [loss.item(),]
+        model, optimizer, criterion, device=device, output_transform=lambda x, y, y_pred, loss: [loss.item()]
     )
 
     val_metrics = {"accuracy": Accuracy(), "nll": Loss(criterion)}

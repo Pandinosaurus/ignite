@@ -1,19 +1,31 @@
-import warnings
 from abc import ABCMeta, abstractmethod
-from collections.abc import Mapping
+from collections import OrderedDict
+from collections.abc import Callable, Mapping, Sequence
 from functools import wraps
 from numbers import Number
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence, Tuple, Union
+import traceback
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
 import ignite.distributed as idist
+from ignite.base.mixins import Serializable
 from ignite.engine import CallableEventWithFilter, Engine, Events
+from ignite.utils import _CollectionItem, _tree_apply2, _tree_map
 
 if TYPE_CHECKING:
     from ignite.metrics.metrics_lambda import MetricsLambda
 
-__all__ = ["Metric", "MetricUsage", "EpochWise", "BatchWise", "BatchFiltered"]
+__all__ = [
+    "Metric",
+    "MetricUsage",
+    "EpochWise",
+    "BatchWise",
+    "BatchFiltered",
+    "RunningEpochWise",
+    "RunningBatchWise",
+    "SingleEpochRunningBatchWise",
+]
 
 
 class MetricUsage:
@@ -31,6 +43,8 @@ class MetricUsage:
         iteration_completed: event when the metric updates. This event will be associated to
             :meth:`~ignite.metrics.metric.Metric.iteration_completed`.
     """
+
+    usage_name: str
 
     def __init__(self, started: Events, completed: Events, iteration_completed: CallableEventWithFilter) -> None:
         self.__started = started
@@ -68,10 +82,37 @@ class EpochWise(MetricUsage):
     usage_name: str = "epoch_wise"
 
     def __init__(self) -> None:
-        super(EpochWise, self).__init__(
+        super().__init__(
             started=Events.EPOCH_STARTED,
             completed=Events.EPOCH_COMPLETED,
             iteration_completed=Events.ITERATION_COMPLETED,
+        )
+
+
+class RunningEpochWise(EpochWise):
+    """
+    Running epoch-wise usage of Metrics. It's the running version of the :class:`~.metrics.metric.EpochWise` metric
+    usage. A metric with such a usage most likely accompanies an :class:`~.metrics.metric.EpochWise` one to compute
+    a running measure of it e.g. running average.
+
+    Metric's methods are triggered on the following engine events:
+
+    - :meth:`~ignite.metrics.metric.Metric.started` on every ``STARTED``
+      (See :class:`~ignite.engine.events.Events`).
+    - :meth:`~ignite.metrics.metric.Metric.iteration_completed` on every ``EPOCH_COMPLETED``.
+    - :meth:`~ignite.metrics.metric.Metric.completed` on every ``EPOCH_COMPLETED``.
+
+    Attributes:
+        usage_name: usage name string
+    """
+
+    usage_name: str = "running_epoch_wise"
+
+    def __init__(self) -> None:
+        super(EpochWise, self).__init__(
+            started=Events.STARTED,
+            completed=Events.EPOCH_COMPLETED,
+            iteration_completed=Events.EPOCH_COMPLETED,
         )
 
 
@@ -93,8 +134,61 @@ class BatchWise(MetricUsage):
     usage_name: str = "batch_wise"
 
     def __init__(self) -> None:
-        super(BatchWise, self).__init__(
+        super().__init__(
             started=Events.ITERATION_STARTED,
+            completed=Events.ITERATION_COMPLETED,
+            iteration_completed=Events.ITERATION_COMPLETED,
+        )
+
+
+class RunningBatchWise(BatchWise):
+    """
+    Running batch-wise usage of Metrics. It's the running version of the :class:`~.metrics.metric.EpochWise` metric
+    usage. A metric with such a usage could for example accompany a :class:`~.metrics.metric.BatchWise` one to compute
+    a running measure of it e.g. running average.
+
+    Metric's methods are triggered on the following engine events:
+
+    - :meth:`~ignite.metrics.metric.Metric.started` on every ``STARTED``
+      (See :class:`~ignite.engine.events.Events`).
+    - :meth:`~ignite.metrics.metric.Metric.iteration_completed` on every ``ITERATION_COMPLETED``.
+    - :meth:`~ignite.metrics.metric.Metric.completed` on every ``ITERATION_COMPLETED``.
+
+    Attributes:
+        usage_name: usage name string
+    """
+
+    usage_name: str = "running_batch_wise"
+
+    def __init__(self) -> None:
+        super(BatchWise, self).__init__(
+            started=Events.STARTED,
+            completed=Events.ITERATION_COMPLETED,
+            iteration_completed=Events.ITERATION_COMPLETED,
+        )
+
+
+class SingleEpochRunningBatchWise(BatchWise):
+    """
+    Running batch-wise usage of Metrics in a single epoch. It's like :class:`~.metrics.metric.RunningBatchWise` metric
+    usage with the difference that is used during a single epoch.
+
+    Metric's methods are triggered on the following engine events:
+
+    - :meth:`~ignite.metrics.metric.Metric.started` on every ``EPOCH_STARTED``
+      (See :class:`~ignite.engine.events.Events`).
+    - :meth:`~ignite.metrics.metric.Metric.iteration_completed` on every ``ITERATION_COMPLETED``.
+    - :meth:`~ignite.metrics.metric.Metric.completed` on every ``ITERATION_COMPLETED``.
+
+    Attributes:
+        usage_name: usage name string
+    """
+
+    usage_name: str = "single_epoch_running_batch_wise"
+
+    def __init__(self) -> None:
+        super(BatchWise, self).__init__(
+            started=Events.EPOCH_STARTED,
             completed=Events.ITERATION_COMPLETED,
             iteration_completed=Events.ITERATION_COMPLETED,
         )
@@ -119,14 +213,14 @@ class BatchFiltered(MetricUsage):
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super(BatchFiltered, self).__init__(
+        super().__init__(
             started=Events.EPOCH_STARTED,
             completed=Events.EPOCH_COMPLETED,
             iteration_completed=Events.ITERATION_COMPLETED(*args, **kwargs),
         )
 
 
-class Metric(metaclass=ABCMeta):
+class Metric(Serializable, metaclass=ABCMeta):
     """
     Base class for all Metrics.
 
@@ -139,16 +233,77 @@ class Metric(metaclass=ABCMeta):
         device: specifies which device updates are accumulated on. Setting the
             metric's device to be the same as your ``update`` arguments ensures the ``update`` method is
             non-blocking. By default, CPU.
+        skip_unrolling: specifies whether output should be unrolled before being fed to update method. Should be
+            true for multi-output model, for example, if ``y_pred`` contains multi-output as ``(y_pred_a, y_pred_b)``
+            Alternatively, ``output_transform`` can be used to handle this.
+        metrics_result_mode: specifies how to put the computed metrics results into
+            ``engine.state.metrics`` dictionary. Valid values are: "flatten", "named", "both".
+            - "flatten": if the computed result is a mapping, its keys/values are put directly into the engine state metrics dictionary
+            - "named": if the computed result is a mapping, the whole mapping is put into the engine state metrics dictionary under the metric name
+            - "both": combination of "flatten" and "named".
+
+
+            Examples:
+                The following example shows a custom loss metric that expects input from a multi-output model.
+
+                .. code-block:: python
+
+                    import torch
+                    import torch.nn as nn
+                    import torch.nn.functional as F
+
+                    from ignite.engine import create_supervised_evaluator
+                    from ignite.metrics import Loss
+
+                    class MyLoss(nn.Module):
+                        def __init__(self, ca: float = 1.0, cb: float = 1.0) -> None:
+                            super().__init__()
+                            self.ca = ca
+                            self.cb = cb
+
+                        def forward(self,
+                                    y_pred: tuple[torch.Tensor, torch.Tensor],
+                                    y_true: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+                            a_true, b_true = y_true
+                            a_pred, b_pred = y_pred
+                            return self.ca * F.mse_loss(a_pred, a_true) + self.cb * F.cross_entropy(b_pred, b_true)
+
+
+                    def prepare_batch(batch, device, non_blocking):
+                        return torch.rand(4, 1), (torch.rand(4, 1), torch.rand(4, 2))
+
+
+                    class MyModel(nn.Module):
+
+                        def forward(self, x):
+                            return torch.rand(4, 1), torch.rand(4, 2)
+
+
+                    model = MyModel()
+
+                    device = "cpu"
+                    loss = MyLoss(0.5, 1.0)
+                    metrics = {
+                        "Loss": Loss(loss, skip_unrolling=True)
+                    }
+                    train_evaluator = create_supervised_evaluator(model, metrics, device, prepare_batch=prepare_batch)
+
+
+                    data = range(10)
+                    train_evaluator.run(data)
+                    train_evaluator.state.metrics["Loss"]
 
     Attributes:
         required_output_keys: dictionary defines required keys to be found in ``engine.state.output`` if the
-            latter is a dictionary. Default, ``("y_pred", "y")``. This is useful with custom metrics that can require
+            latter is a dictionary. By default, ``("y_pred", "y")``. This is useful with custom metrics that can require
             other arguments than predictions ``y_pred`` and targets ``y``. See an example below.
 
     Examples:
         Let's implement a custom metric that requires ``y_pred``, ``y`` and ``x`` as input for ``update`` function.
         In the example below we show how to setup standard metric like Accuracy and the custom metric using by an
         ``evaluator`` created with :meth:`~ignite.engine.create_supervised_evaluator` method.
+
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
 
         .. code-block:: python
 
@@ -196,45 +351,54 @@ class Metric(metaclass=ABCMeta):
 
     .. versionchanged:: 0.4.2
         ``required_output_keys`` became public attribute.
+
+    .. versionchanged:: 0.5.1
+        ``skip_unrolling`` argument is added.
     """
 
     # public class attribute
-    required_output_keys: Optional[Tuple] = ("y_pred", "y")
+    required_output_keys: tuple | None = ("y_pred", "y")
     # for backward compatibility
     _required_output_keys = required_output_keys
 
     def __init__(
-        self, output_transform: Callable = lambda x: x, device: Union[str, torch.device] = torch.device("cpu"),
+        self,
+        output_transform: Callable = lambda x: x,
+        device: str | torch.device = torch.device("cpu"),
+        skip_unrolling: bool = False,
+        metrics_result_mode: Literal["flatten", "named", "both"] = "both",
     ):
+        if not callable(output_transform):
+            raise TypeError(f"Argument output_transform should be callable, got {type(output_transform)}")
         self._output_transform = output_transform
-
-        # Check device if distributed is initialized:
-        if idist.get_world_size() > 1:
-
-            # check if reset and update methods are decorated. Compute may not be decorated
-            if not (hasattr(self.reset, "_decorated") and hasattr(self.update, "_decorated")):
-                warnings.warn(
-                    f"{self.__class__.__name__} class does not support distributed setting. "
-                    "Computed result is not collected across all computing devices",
-                    RuntimeWarning,
-                )
 
         # Some metrics have a large performance regression when run on XLA devices, so for now, we disallow it.
         if torch.device(device).type == "xla":
             raise ValueError("Cannot create metric on an XLA device. Use device='cpu' instead.")
 
+        # pyrefly: ignore [read-only]
         self._device = torch.device(device)
-        self._is_reduced = False
+        self._skip_unrolling = skip_unrolling
+
+        valid_modes = ("flatten", "named", "both")
+        if not isinstance(metrics_result_mode, str) or metrics_result_mode not in valid_modes:
+            raise ValueError(f"Argument metrics_result_mode should be one of {valid_modes}, got {metrics_result_mode}")
+        self._metrics_result_mode = metrics_result_mode
+
+        # MPS framework doesn't support float64, should use float32
+        self._double_dtype = torch.float64
+        if self._device.type == "mps":
+            self._double_dtype = torch.float32
+
         self.reset()
 
     @abstractmethod
     def reset(self) -> None:
         """
-        Resets the metric to it's initial state.
+        Resets the metric to its initial state.
 
         By default, this is called at the start of each epoch.
         """
-        pass
 
     @abstractmethod
     def update(self, output: Any) -> None:
@@ -246,12 +410,11 @@ class Metric(metaclass=ABCMeta):
         Args:
             output: the is the output from the engine's process function.
         """
-        pass
 
     @abstractmethod
     def compute(self) -> Any:
         """
-        Computes the metric based on it's accumulated state.
+        Computes the metric based on its accumulated state.
 
         By default, this is called at the end of each epoch.
 
@@ -263,7 +426,6 @@ class Metric(metaclass=ABCMeta):
         Raises:
             NotComputableError: raised when the metric cannot be computed.
         """
-        pass
 
     def started(self, engine: Engine) -> None:
         """Helper method to start data gathering for metric's computation. It is automatically attached to the
@@ -284,7 +446,7 @@ class Metric(metaclass=ABCMeta):
 
         Note:
             ``engine.state.output`` is used to compute metric values.
-            The majority of implemented metrics accepts the following formats for ``engine.state.output``:
+            The majority of implemented metrics accept the following formats for ``engine.state.output``:
             ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y}``. ``y_pred`` and ``y`` can be torch tensors or
             list of tensors/numbers if applicable.
 
@@ -306,7 +468,11 @@ class Metric(metaclass=ABCMeta):
                 )
             output = tuple(output[k] for k in self.required_output_keys)
 
-        if isinstance(output, Sequence) and all([_is_list_of_tensors_or_numbers(o) for o in output]):
+        if (
+            (not self._skip_unrolling)
+            and isinstance(output, Sequence)
+            and all([_is_list_of_tensors_or_numbers(o) for o in output])
+        ):
             if not (len(output) == 2 and len(output[0]) == len(output[1])):
                 raise ValueError(
                     f"Output should have 2 items of the same length, "
@@ -338,12 +504,16 @@ class Metric(metaclass=ABCMeta):
         """
         result = self.compute()
         if isinstance(result, Mapping):
-            if name in result.keys():
+            # Only raise conflict when we will set the mapping under `name`.
+            if self._metrics_result_mode in ("named", "both") and name in result.keys():
                 raise ValueError(f"Argument name '{name}' is conflicting with mapping keys: {list(result.keys())}")
 
-            for key, value in result.items():
-                engine.state.metrics[key] = value
-            engine.state.metrics[name] = result
+            if self._metrics_result_mode in ("flatten", "both"):
+                for key, value in result.items():
+                    engine.state.metrics[key] = value
+
+            if self._metrics_result_mode in ("named", "both"):
+                engine.state.metrics[name] = result
         else:
             if isinstance(result, torch.Tensor):
                 if len(result.size()) == 0:
@@ -353,19 +523,23 @@ class Metric(metaclass=ABCMeta):
 
             engine.state.metrics[name] = result
 
-    def _check_usage(self, usage: Union[str, MetricUsage]) -> MetricUsage:
+    def _check_usage(self, usage: str | MetricUsage) -> MetricUsage:
         if isinstance(usage, str):
-            if usage == EpochWise.usage_name:
-                usage = EpochWise()
-            elif usage == BatchWise.usage_name:
-                usage = BatchWise()
-            else:
-                raise ValueError(f"usage should be 'EpochWise.usage_name' or 'BatchWise.usage_name', get {usage}")
+            usages = [EpochWise, RunningEpochWise, BatchWise, RunningBatchWise, SingleEpochRunningBatchWise]
+            for usage_cls in usages:
+                if usage == usage_cls.usage_name:
+                    usage = usage_cls()
+                    break
+            if not isinstance(usage, MetricUsage):
+                raise ValueError(
+                    "Argument usage should be '(Running)EpochWise.usage_name' or "
+                    f"'((SingleEpoch)Running)BatchWise.usage_name', got {usage}"
+                )
         if not isinstance(usage, MetricUsage):
             raise TypeError(f"Unhandled usage type {type(usage)}")
         return usage
 
-    def attach(self, engine: Engine, name: str, usage: Union[str, MetricUsage] = EpochWise()) -> None:
+    def attach(self, engine: Engine, name: str, usage: str | MetricUsage = EpochWise()) -> None:
         """
         Attaches current metric to provided engine. On the end of engine's run, `engine.state.metrics` dictionary will
         contain computed metric's value under provided name.
@@ -378,6 +552,7 @@ class Metric(metaclass=ABCMeta):
                 :attr:`ignite.metrics.metric.BatchWise.usage_name`.
 
         Examples:
+
             .. code-block:: python
 
                 metric = ...
@@ -405,7 +580,7 @@ class Metric(metaclass=ABCMeta):
             engine.add_event_handler(usage.ITERATION_COMPLETED, self.iteration_completed)
         engine.add_event_handler(usage.COMPLETED, self.completed, name)
 
-    def detach(self, engine: Engine, usage: Union[str, MetricUsage] = EpochWise()) -> None:
+    def detach(self, engine: Engine, usage: str | MetricUsage = EpochWise()) -> None:
         """
         Detaches current metric from the engine and no metric's computation is done during the run.
         This method in conjunction with :meth:`~ignite.metrics.metric.Metric.attach` can be useful if several
@@ -448,7 +623,7 @@ class Metric(metaclass=ABCMeta):
         if engine.has_event_handler(self.iteration_completed, usage.ITERATION_COMPLETED):
             engine.remove_event_handler(self.iteration_completed, usage.ITERATION_COMPLETED)
 
-    def is_attached(self, engine: Engine, usage: Union[str, MetricUsage] = EpochWise()) -> bool:
+    def is_attached(self, engine: Engine, usage: str | MetricUsage = EpochWise()) -> bool:
         """
         Checks if current metric is attached to provided engine. If attached, metric's computed
         value is written to `engine.state.metrics` dictionary.
@@ -460,6 +635,95 @@ class Metric(metaclass=ABCMeta):
         """
         usage = self._check_usage(usage)
         return engine.has_event_handler(self.completed, usage.COMPLETED)
+
+    def _state_dict_per_rank(self) -> OrderedDict:
+        def func(x: torch.Tensor | Metric | None | float, **kwargs: Any) -> torch.Tensor | float | OrderedDict | None:
+            if isinstance(x, Metric):
+                return x._state_dict_per_rank()
+            if x is None or isinstance(x, (int, float, torch.Tensor)):
+                return x
+            else:
+                raise TypeError(
+                    "Found attribute of unsupported type. Currently, supported types include"
+                    " numeric types, tensor, Metric or sequence/mapping of metrics."
+                )
+
+        state: OrderedDict[str, torch.Tensor | list | dict | None] = OrderedDict()
+        for attr_name in self._state_dict_all_req_keys:
+            if attr_name not in self.__dict__:
+                raise ValueError(
+                    f"Found a value in _state_dict_all_req_keys that is not among metric attributes: {attr_name}"
+                )
+            attr = getattr(self, attr_name)
+            state[attr_name] = _tree_map(func, attr)  # type: ignore[assignment]
+
+        return state
+
+    __state_dict_key_per_rank: str = "__metric_state_per_rank"
+
+    def state_dict(self) -> OrderedDict:
+        """Method returns state dict with attributes of the metric specified in its
+        `_state_dict_all_req_keys` attribute. Can be used to save internal state of the class.
+        """
+        state = self._state_dict_per_rank()
+
+        if idist.get_world_size() > 1:
+            return OrderedDict([(Metric.__state_dict_key_per_rank, idist.all_gather(state))])
+        return OrderedDict([(Metric.__state_dict_key_per_rank, [state])])
+
+    def _load_state_dict_per_rank(self, state_dict: Mapping) -> None:
+        super().load_state_dict(state_dict)
+
+        def func(x: Any, y: Any) -> None:
+            if isinstance(x, Metric):
+                x._load_state_dict_per_rank(y)
+            elif isinstance(x, _CollectionItem):
+                value = x.value()
+                if y is None or isinstance(y, _CollectionItem.types_as_collection_item):
+                    x.load_value(y)
+                elif isinstance(value, Metric):
+                    value._load_state_dict_per_rank(y)
+                else:
+                    raise ValueError(f"Unsupported type for provided state_dict data: {type(y)}")
+
+        for attr_name in self._state_dict_all_req_keys:
+            attr = getattr(self, attr_name)
+            attr = _CollectionItem.wrap(self.__dict__, attr_name, attr)
+            _tree_apply2(func, attr, state_dict[attr_name])
+
+    def load_state_dict(self, state_dict: Mapping) -> None:
+        """Method replaces internal state of the class with provided state dict data.
+
+        If there's an active distributed configuration, the process uses its rank to pick the proper value from
+        the list of values saved under each attribute's name in the dict.
+
+        Args:
+            state_dict: a dict containing attributes of the metric specified in its `_state_dict_all_req_keys`
+                attribute.
+        """
+        if not isinstance(state_dict, Mapping):
+            raise TypeError(f"Argument state_dict should be a dictionary, but given {type(state_dict)}")
+
+        if not (len(state_dict) == 1 and Metric.__state_dict_key_per_rank in state_dict):
+            raise ValueError(
+                "Incorrect state_dict object. Argument state_dict should be a dictionary "
+                "provided by Metric.state_dict(). "
+                f"Expected single key: {Metric.__state_dict_key_per_rank}, but given {state_dict.keys()}"
+            )
+
+        list_state_dicts_per_rank = state_dict[Metric.__state_dict_key_per_rank]
+        rank = idist.get_rank()
+        world_size = idist.get_world_size()
+        if len(list_state_dicts_per_rank) != world_size:
+            raise ValueError(
+                "Incorrect state_dict object. Argument state_dict should be a dictionary "
+                "provided by Metric.state_dict(). "
+                f"Expected a list of state_dicts of size equal world_size: {world_size}, "
+                f"but got {len(list_state_dicts_per_rank)}"
+            )
+
+        state_dict = list_state_dicts_per_rank[rank]
+        self._load_state_dict_per_rank(state_dict)
 
     def __add__(self, other: Any) -> "MetricsLambda":
         from ignite.metrics.metrics_lambda import MetricsLambda
@@ -494,12 +758,12 @@ class Metric(metaclass=ABCMeta):
     def __pow__(self, other: Any) -> "MetricsLambda":
         from ignite.metrics.metrics_lambda import MetricsLambda
 
-        return MetricsLambda(lambda x, y: x ** y, self, other)
+        return MetricsLambda(lambda x, y: x**y, self, other)
 
     def __rpow__(self, other: Any) -> "MetricsLambda":
         from ignite.metrics.metrics_lambda import MetricsLambda
 
-        return MetricsLambda(lambda x, y: x ** y, other, self)
+        return MetricsLambda(lambda x, y: x**y, other, self)
 
     def __mod__(self, other: Any) -> "MetricsLambda":
         from ignite.metrics.metrics_lambda import MetricsLambda
@@ -509,12 +773,12 @@ class Metric(metaclass=ABCMeta):
     def __truediv__(self, other: Any) -> "MetricsLambda":
         from ignite.metrics.metrics_lambda import MetricsLambda
 
-        return MetricsLambda(lambda x, y: x.__truediv__(y), self, other)
+        return MetricsLambda(lambda x, y: x / y, self, other)
 
     def __rtruediv__(self, other: Any) -> "MetricsLambda":
         from ignite.metrics.metrics_lambda import MetricsLambda
 
-        return MetricsLambda(lambda x, y: x.__truediv__(y), other, self)
+        return MetricsLambda(lambda x, y: x / y, other, self)
 
     def __floordiv__(self, other: Any) -> "MetricsLambda":
         from ignite.metrics.metrics_lambda import MetricsLambda
@@ -524,8 +788,22 @@ class Metric(metaclass=ABCMeta):
     def __getattr__(self, attr: str) -> Callable:
         from ignite.metrics.metrics_lambda import MetricsLambda
 
+        if attr.startswith("__") and attr.endswith("__"):
+            return object.__getattribute__(self, attr)
+
+        # Capture the call stack at definition time so that if the attribute
+        # turns out to be invalid (e.g. a typo), we can point the user back
+        # to where they wrote it instead of erroring deep inside compute().
+        definition_trace = "".join(traceback.format_stack()[:-1])
+
         def fn(x: Metric, *args: Any, **kwargs: Any) -> Any:
-            return getattr(x, attr)(*args, **kwargs)
+            try:
+                return getattr(x, attr)(*args, **kwargs)
+            except AttributeError:
+                raise AttributeError(
+                    f"Metric result of type '{type(x)}' has no attribute '{attr}'. "
+                    f"Note: '{attr}' was accessed on the metric at:\n{definition_trace}"
+                ) from None
 
         def wrapper(*args: Any, **kwargs: Any) -> "MetricsLambda":
             return MetricsLambda(fn, self, *args, **kwargs)
@@ -537,10 +815,10 @@ class Metric(metaclass=ABCMeta):
 
         return MetricsLambda(lambda x: x[index], self)
 
-    def __getstate__(self) -> Dict:
+    def __getstate__(self) -> dict:
         return self.__dict__
 
-    def __setstate__(self, d: Dict) -> None:
+    def __setstate__(self, d: dict) -> None:
         self.__dict__.update(d)
 
 
@@ -565,25 +843,37 @@ def sync_all_reduce(*attrs: Any) -> Callable:
                     "Decorator sync_all_reduce should be used on ignite.metric.Metric class methods only"
                 )
             ws = idist.get_world_size()
-            if len(attrs) > 0 and not self._is_reduced:
-                if ws > 1:
-                    for attr in attrs:
-                        op_kwargs = {}
-                        if ":" in attr:
-                            attr, op = attr.split(":")
-                            valid_ops = ["MIN", "MAX", "SUM", "PRODUCT"]
-                            if op not in valid_ops:
-                                raise ValueError(f"Reduction operation is not valid (expected : {valid_ops}, got: {op}")
-                            op_kwargs["op"] = op
-                        t = getattr(self, attr, None)
-                        if t is not None:
-                            t = idist.all_reduce(t, **op_kwargs)
-                            self._is_reduced = True
-                            setattr(self, attr, t)
-                else:
-                    self._is_reduced = True
+            unreduced_attrs = {}
+            if len(attrs) > 0 and ws > 1:
+                for attr in attrs:
+                    op_kwargs = {}
+                    if ":" in attr:
+                        attr, op = attr.split(":")
+                        valid_ops = ["MIN", "MAX", "SUM", "PRODUCT"]
+                        if op not in valid_ops:
+                            raise ValueError(f"Reduction operation is not valid (expected : {valid_ops}, got: {op}")
+                        op_kwargs["op"] = op
+                    if attr not in self.__dict__:
+                        raise ValueError(f"Metric {type(self)} has no attribute named `{attr}`.")
+                    t = getattr(self, attr)
+                    if not isinstance(t, (Number, torch.Tensor)):
+                        raise TypeError(
+                            "Attribute provided to sync_all_reduce should be a "
+                            f"number or tensor but `{attr}` has type {type(t)}"
+                        )
+                    unreduced_attrs[attr] = t
+                    # Here `clone` is necessary since `idist.all_reduce` modifies `t` inplace in the case
+                    # `t` is a tensor and its `device` is same as that of the process.
+                    # TODO: Remove this dual behavior of `all_reduce` to always either return a new tensor or
+                    #       modify it in-place.
+                    t_reduced = idist.all_reduce(cast(float, t) if isinstance(t, Number) else t.clone(), **op_kwargs)
+                    setattr(self, attr, t_reduced)
 
-            return func(self, *args, **kwargs)
+            result = func(self, *args, **kwargs)
+
+            for attr, value in unreduced_attrs.items():
+                setattr(self, attr, value)
+            return result
 
         return another_wrapper
 
@@ -603,17 +893,18 @@ def reinit__is_reduced(func: Callable) -> Callable:
     @wraps(func)
     def wrapper(self: Metric, *args: Any, **kwargs: Any) -> None:
         func(self, *args, **kwargs)
-        self._is_reduced = False
+        if "_result" in self.__dict__:
+            self._result = None  # type: ignore[attr-defined]
 
     setattr(wrapper, "_decorated", True)
     return wrapper
 
 
-def _is_list_of_tensors_or_numbers(x: Sequence[Union[torch.Tensor, float]]) -> bool:
+def _is_list_of_tensors_or_numbers(x: Sequence[torch.Tensor | float]) -> bool:
     return isinstance(x, Sequence) and all([isinstance(t, (torch.Tensor, Number)) for t in x])
 
 
-def _to_batched_tensor(x: Union[torch.Tensor, float], device: Optional[torch.device] = None) -> torch.Tensor:
+def _to_batched_tensor(x: torch.Tensor | Number, device: torch.device | None = None) -> torch.Tensor:
     if isinstance(x, torch.Tensor):
         return x.unsqueeze(dim=0)
-    return torch.tensor([x,], device=device)
+    return torch.tensor([x], device=device)

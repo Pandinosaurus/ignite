@@ -1,5 +1,4 @@
 import time
-from typing import Optional
 
 from ignite.engine import Engine
 
@@ -28,19 +27,18 @@ class TimeLimit:
     .. versionadded:: 0.4.3
     """
 
-    def __init__(self, limit_sec: Optional[int] = 28800):
-
+    def __init__(self, limit_sec: int | None = 28800):
         if not isinstance(limit_sec, int):
             raise TypeError("Argument limit_sec should be an integer.")
         if limit_sec <= 0:
             raise ValueError("Argument limit_sec should be a positive integer.")
 
         self.limit_sec = limit_sec
-        self.start_time = time.time()
+        self.start_time = time.perf_counter()
         self.logger = setup_logger(__name__ + "." + self.__class__.__name__)
 
     def __call__(self, engine: Engine) -> None:
-        elapsed_time = time.time() - self.start_time
+        elapsed_time = time.perf_counter() - self.start_time
         if elapsed_time > self.limit_sec:
-            self.logger.info("Reached the time limit: {} sec. Stop training".format(self.limit_sec))
+            self.logger.info(f"Reached the time limit: {self.limit_sec} sec. Stop training")
             engine.terminate()

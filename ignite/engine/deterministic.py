@@ -2,7 +2,8 @@ import random
 import warnings
 from collections import OrderedDict
 from functools import wraps
-from typing import Any, Callable, Generator, Iterator, List, Optional
+from collections.abc import Callable, Generator, Iterator
+from typing import Any
 
 import torch
 from torch.utils.data import DataLoader
@@ -56,11 +57,11 @@ class ReproducibleBatchSampler(BatchSampler):
 
     """
 
-    def __init__(self, batch_sampler: BatchSampler, start_iteration: Optional[int] = None):
+    def __init__(self, batch_sampler: BatchSampler, start_iteration: int | None = None):
         if not isinstance(batch_sampler, BatchSampler):
             raise TypeError("Argument batch_sampler should be torch.utils.data.sampler.BatchSampler")
 
-        self.batch_indices = []  # type: List
+        self.batch_indices: list = []
         self.batch_sampler = batch_sampler
         self.start_iteration = start_iteration
         self.sampler = self.batch_sampler.sampler
@@ -84,8 +85,8 @@ class ReproducibleBatchSampler(BatchSampler):
         return len(self.batch_sampler)
 
 
-def _get_rng_states() -> List[Any]:
-    output = [random.getstate(), torch.get_rng_state()]
+def _get_rng_states() -> list[Any]:
+    output: list[Any] = [random.getstate(), torch.get_rng_state()]
     try:
         import numpy as np
 
@@ -96,7 +97,7 @@ def _get_rng_states() -> List[Any]:
     return output
 
 
-def _set_rng_states(rng_states: List[Any]) -> None:
+def _set_rng_states(rng_states: list[Any]) -> None:
     random.setstate(rng_states[0])
 
     if "cpu" not in rng_states[1].device.type:
@@ -111,7 +112,7 @@ def _set_rng_states(rng_states: List[Any]) -> None:
         pass
 
 
-def _repr_rng_state(rng_states: List[Any]) -> str:
+def _repr_rng_state(rng_states: list[Any]) -> str:
     from hashlib import md5
 
     out = " ".join([md5(str(list(s)).encode("utf-8")).hexdigest() for s in rng_states])
@@ -176,30 +177,32 @@ class DeterministicEngine(Engine):
             in each iteration, and returns data to be stored in the engine's state.
     """
 
-    def __init__(self, process_function: Callable):
-        super(DeterministicEngine, self).__init__(process_function)
+    def __init__(self, process_function: Callable[[Engine, Any], Any]):
+        super().__init__(process_function)
         self.state_dict_user_keys.append("rng_states")
+        if not hasattr(self.state, "rng_states"):
+            setattr(self.state, "rng_states", None)
         self.add_event_handler(Events.STARTED, self._init_run)
         self.add_event_handler(Events.DATALOADER_STOP_ITERATION | Events.TERMINATE_SINGLE_EPOCH, self._setup_seed)
 
     def state_dict(self) -> OrderedDict:
-        state_dict = super(DeterministicEngine, self).state_dict()
+        state_dict = super().state_dict()
         state_dict["rng_states"] = _get_rng_states()
         return state_dict
 
     def _init_run(self) -> None:
         self.state.seed = int(torch.randint(0, int(1e9), (1,)).item())
-        if not hasattr(self.state, "rng_states"):
-            setattr(self.state, "rng_states", None)
-
         if torch.cuda.is_available():
-            torch.backends.cudnn.deterministic = True
+            if hasattr(torch, "use_deterministic_algorithms"):
+                torch.use_deterministic_algorithms(True, warn_only=True)
+            else:
+                torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
 
     def _setup_engine(self) -> None:
         if self.state.dataloader is None:
-            raise RuntimeError(
-                "Internal error, self.state.dataloader is None. Please, file an issue if you encounter this error."
+            raise ValueError(
+                "Deterministic engine does not support the option of data=None. Please, provide data as iterable"
             )
 
         self._dataloader_len = self._get_data_length(self.state.dataloader)
@@ -225,7 +228,8 @@ class DeterministicEngine(Engine):
                 batch_sampler = self.state.dataloader.batch_sampler
                 if not (batch_sampler is None or isinstance(batch_sampler, ReproducibleBatchSampler)):
                     self.state.dataloader = update_dataloader(
-                        self.state.dataloader, ReproducibleBatchSampler(batch_sampler)  # type: ignore[arg-type]
+                        self.state.dataloader,
+                        ReproducibleBatchSampler(batch_sampler),  # type: ignore[arg-type]
                     )
 
         iteration = self.state.iteration
@@ -234,7 +238,7 @@ class DeterministicEngine(Engine):
         # Below we define initial counter value for _run_once_on_dataset to measure a single epoch
         if self.state.epoch_length is not None:
             iteration %= self.state.epoch_length
-        self._init_iter.append(iteration)
+        self._init_iter = iteration
 
         # restore rng state if in the middle
         in_the_middle = self.state.iteration % self._dataloader_len > 0 if self._dataloader_len is not None else False
@@ -252,12 +256,12 @@ class DeterministicEngine(Engine):
         if isinstance(data, DataLoader):
             try:
                 # following is unsafe for IterableDatasets
-                iteration %= len(data.batch_sampler)  # type: ignore[attr-defined, arg-type]
+                iteration %= len(data.batch_sampler)  # type: ignore[arg-type]
                 # Synchronize dataflow according to state.iteration
                 self._setup_seed()
                 if iteration > 0:
                     # batch sampler is ReproducibleBatchSampler
-                    data.batch_sampler.start_iteration = iteration  # type: ignore[attr-defined, union-attr]
+                    data.batch_sampler.start_iteration = iteration  # type: ignore[union-attr]
                 return iter(data)
             except TypeError as e:
                 # Probably we can do nothing with DataLoader built upon IterableDatasets
@@ -266,7 +270,7 @@ class DeterministicEngine(Engine):
         self.logger.info("Resuming from iteration for provided data will fetch data until required iteration ...")
         if hasattr(data, "__len__"):
             iteration %= len(data)  # type: ignore[arg-type]
-        # Synchronize dataflow from the begining
+        # Synchronize dataflow from the beginning
         self._setup_seed(iteration=0)
         data_iter = iter(data)
         counter = 0
@@ -279,7 +283,7 @@ class DeterministicEngine(Engine):
 
         return data_iter
 
-    def _setup_seed(self, _: Any = None, iter_counter: Optional[int] = None, iteration: Optional[int] = None) -> None:
+    def _setup_seed(self, _: Any = None, iter_counter: int | None = None, iteration: int | None = None) -> None:
         if iter_counter is None:
             le = self._dataloader_len if self._dataloader_len is not None else 1
         elif not iter_counter > 0:

@@ -6,7 +6,6 @@ import ignite.distributed as idist
 
 
 def training(local_rank, config, **kwargs):
-
     import time
 
     time.sleep(idist.get_rank() * 0.1)
@@ -38,19 +37,20 @@ if __name__ == "__main__":
         python tests/ignite/distributed/check_idist_parallel.py
         ```
 
-        - Launch 4 procs using gloo backend with `torch.distributed.launch`
+        - Launch 4 procs using gloo backend with `torchrun`:
+
         ```
-        python -m torch.distributed.launch --nproc_per_node=4 --use_env \
-            tests/ignite/distributed/check_idist_parallel.py --backend=gloo
+        torchrun --nproc_per_node=4 tests/ignite/distributed/check_idist_parallel.py --backend=gloo
         ```
 
-        - Launch 2 procs in 2 nodes using gloo backend with `torch.distributed.launch`:
+        - Launch 2 procs in 2 nodes using gloo backend with `torchrun` or `torch.distributed.launch`:
+
         ```
-        bash -c "python -m torch.distributed.launch --nnodes=2 --node_rank=0 \
-            --master_addr=localhost --master_port=3344 --nproc_per_node=2 --use_env \
+        bash -c "torchrun --nnodes=2 --node_rank=0 \
+            --master_addr=localhost --master_port=3344 --nproc_per_node=2 \
             tests/ignite/distributed/check_idist_parallel.py --backend=gloo &" \
-        && bash -c "python -m torch.distributed.launch --nnodes=2 --node_rank=1 \
-            --master_addr=localhost --master_port=3344 --nproc_per_node=2 --use_env \
+        && bash -c "torchrun --nnodes=2 --node_rank=1 \
+            --master_addr=localhost --master_port=3344 --nproc_per_node=2 \
             tests/ignite/distributed/check_idist_parallel.py --backend=gloo &"
         ```
 

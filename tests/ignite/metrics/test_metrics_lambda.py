@@ -8,12 +8,12 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 
 import ignite.distributed as idist
 from ignite.engine import Engine
-from ignite.metrics import Metric, MetricsLambda, Precision, Recall
+from ignite.metrics import Accuracy, Metric, MetricsLambda, Precision, Recall
 
 
 class ListGatherMetric(Metric):
     def __init__(self, index):
-        super(ListGatherMetric, self).__init__()
+        super().__init__()
         self.index = index
 
     def reset(self):
@@ -100,7 +100,6 @@ def test_metrics_lambda_reset():
 
 
 def test_metrics_lambda_update_and_attach_together():
-
     y_pred = torch.randint(0, 2, size=(15, 10, 4)).float()
     y = torch.randint(0, 2, size=(15, 10, 4)).long()
 
@@ -114,7 +113,7 @@ def test_metrics_lambda_update_and_attach_together():
     recall = Recall(average=False)
 
     def Fbeta(r, p, beta):
-        return torch.mean((1 + beta ** 2) * p * r / (beta ** 2 * p + r)).item()
+        return torch.mean((1 + beta**2) * p * r / (beta**2 * p + r)).item()
 
     F1 = MetricsLambda(Fbeta, recall, precision, 1)
 
@@ -138,7 +137,6 @@ def test_metrics_lambda_update_and_attach_together():
 
 
 def test_metrics_lambda_update():
-
     """
     Test if the underlying metrics are updated
     """
@@ -149,7 +147,7 @@ def test_metrics_lambda_update():
     recall = Recall(average=False)
 
     def Fbeta(r, p, beta):
-        return torch.mean((1 + beta ** 2) * p * r / (beta ** 2 * p + r)).item()
+        return torch.mean((1 + beta**2) * p * r / (beta**2 * p + r)).item()
 
     F1 = MetricsLambda(Fbeta, recall, precision, 1)
 
@@ -195,8 +193,8 @@ def test_metrics_lambda_update():
     positives = all_positives1 + all_positives2
 
     assert precision._type == "binary"
-    assert precision._true_positives == true_positives
-    assert precision._positives == positives
+    assert precision._numerator == true_positives
+    assert precision._denominator == positives
 
     # Computing positivies for recall is different
     positives1 = y1.sum(dim=0)
@@ -204,8 +202,8 @@ def test_metrics_lambda_update():
     positives = positives1 + positives2
 
     assert recall._type == "binary"
-    assert recall._true_positives == true_positives
-    assert recall._positives == positives
+    assert recall._numerator == true_positives
+    assert recall._denominator == positives
 
     """
     Test compute
@@ -217,20 +215,21 @@ def test_metrics_lambda_update():
     assert pytest.approx(F1_metrics_lambda) == F1_sklearn
 
 
-def test_integration():
-    np.random.seed(1)
+@pytest.mark.parametrize("attach_pr_re", [True, False])
+def test_integration(attach_pr_re):
+    torch.manual_seed(1)
 
     n_iters = 10
     batch_size = 10
     n_classes = 10
 
-    y_true = np.arange(0, n_iters * batch_size, dtype="int64") % n_classes
-    y_pred = 0.2 * np.random.rand(n_iters * batch_size, n_classes)
+    y_true = torch.arange(0, n_iters * batch_size) % n_classes
+    y_pred = 0.2 * torch.rand(n_iters * batch_size, n_classes)
     for i in range(n_iters * batch_size):
-        if np.random.rand() > 0.4:
+        if torch.rand(1) > 0.4:
             y_pred[i, y_true[i]] = 1.0
         else:
-            j = np.random.randint(0, n_classes)
+            j = torch.randint(0, n_classes, size=(1,))
             y_pred[i, j] = 0.7
 
     y_true_batch_values = iter(y_true.reshape(n_iters, batch_size))
@@ -239,7 +238,7 @@ def test_integration():
     def update_fn(engine, batch):
         y_true_batch = next(y_true_batch_values)
         y_pred_batch = next(y_pred_batch_values)
-        return torch.from_numpy(y_pred_batch), torch.from_numpy(y_true_batch)
+        return y_pred_batch, y_true_batch
 
     evaluator = Engine(update_fn)
 
@@ -247,72 +246,105 @@ def test_integration():
     recall = Recall(average=False)
 
     def Fbeta(r, p, beta):
-        return torch.mean((1 + beta ** 2) * p * r / (beta ** 2 * p + r)).item()
+        return torch.mean((1 + beta**2) * p * r / (beta**2 * p + r)).item()
 
     F1 = MetricsLambda(Fbeta, recall, precision, 1)
 
-    precision.attach(evaluator, "precision")
-    recall.attach(evaluator, "recall")
+    if attach_pr_re:
+        precision.attach(evaluator, "precision")
+        recall.attach(evaluator, "recall")
     F1.attach(evaluator, "f1")
 
     data = list(range(n_iters))
     state = evaluator.run(data, max_epochs=1)
 
-    precision_true = precision_score(y_true, np.argmax(y_pred, axis=-1), average=None)
-    recall_true = recall_score(y_true, np.argmax(y_pred, axis=-1), average=None)
-    f1_true = f1_score(y_true, np.argmax(y_pred, axis=-1), average="macro")
+    precision_true = precision_score(y_true, y_pred.argmax(dim=-1), average=None)
+    recall_true = recall_score(y_true, y_pred.argmax(dim=-1), average=None)
+    f1_true = f1_score(y_true, y_pred.argmax(dim=-1), average="macro")
 
-    precision = state.metrics["precision"].numpy()
-    recall = state.metrics["recall"].numpy()
-
-    assert precision_true == approx(precision), f"{precision_true} vs {precision}"
-    assert recall_true == approx(recall), f"{recall_true} vs {recall}"
     assert f1_true == approx(state.metrics["f1"]), f"{f1_true} vs {state.metrics['f1']}"
+    if attach_pr_re:
+        precision = state.metrics["precision"].numpy()
+        recall = state.metrics["recall"].numpy()
+
+        assert precision_true == approx(precision), f"{precision_true} vs {precision}"
+        assert recall_true == approx(recall), f"{recall_true} vs {recall}"
+
+    metric_state = F1.state_dict()
+    F1.reset()
+    F1.load_state_dict(metric_state)
+    f1_value = F1.compute()
+    assert f1_value == state.metrics["f1"]
 
 
-def test_integration_ingredients_not_attached():
-    np.random.seed(1)
+def test_load_state_dict():
+    acc = Accuracy()
+    error = 1.0 - acc
 
-    n_iters = 10
-    batch_size = 10
-    n_classes = 10
+    acc.update(
+        (
+            torch.randint(0, 2, size=(8,)),
+            torch.randint(0, 2, size=(8,)),
+        )
+    )
 
-    y_true = np.arange(0, n_iters * batch_size, dtype="int64") % n_classes
-    y_pred = 0.2 * np.random.rand(n_iters * batch_size, n_classes)
-    for i in range(n_iters * batch_size):
-        if np.random.rand() > 0.4:
-            y_pred[i, y_true[i]] = 1.0
-        else:
-            j = np.random.randint(0, n_classes)
-            y_pred[i, j] = 0.7
+    e = error.compute()
+    a = acc.compute()
+    assert 1.0 - a == e
 
-    y_true_batch_values = iter(y_true.reshape(n_iters, batch_size))
-    y_pred_batch_values = iter(y_pred.reshape(n_iters, batch_size, n_classes))
+    metric_state = error.state_dict()
+    error.reset()
+    error.load_state_dict(metric_state)
+    e2 = error.compute()
+    assert e2 == e
 
-    def update_fn(engine, batch):
-        y_true_batch = next(y_true_batch_values)
-        y_pred_batch = next(y_pred_batch_values)
-        return torch.from_numpy(y_pred_batch), torch.from_numpy(y_true_batch)
 
-    evaluator = Engine(update_fn)
+@pytest.mark.parametrize(
+    "metrics_result_mode",
+    [
+        "flatten",
+        "named",
+        "both",
+    ],
+)
+def test_metrics_lambda_result_mode_behavior(metrics_result_mode):
+    # dummy for now
+    def dummy_compute_fn(*args, **kwargs):
+        return {
+            "precision": 0.5,
+            "recall": 0.5,
+            "f1-score": 0.5,
+        }
 
-    precision = Precision(average=False)
-    recall = Recall(average=False)
+    class DummyMetric(Metric):
+        def __init__(self, output_transform=lambda x: x):
+            super().__init__(output_transform=output_transform, metrics_result_mode=metrics_result_mode)
 
-    def Fbeta(r, p, beta):
-        return torch.mean((1 + beta ** 2) * p * r / (beta ** 2 * p + r)).item()
+        def reset(self): ...
 
-    F1 = MetricsLambda(Fbeta, recall, precision, 1)
-    F1.attach(evaluator, "f1")
+        def update(self, output): ...
 
-    data = list(range(n_iters))
-    state = evaluator.run(data, max_epochs=1)
-    f1_true = f1_score(y_true, np.argmax(y_pred, axis=-1), average="macro")
-    assert f1_true == approx(state.metrics["f1"]), f"{f1_true} vs {state.metrics['f1']}"
+        def compute(self):
+            return dummy_compute_fn()
+
+    metric_a = MetricsLambda(dummy_compute_fn, metrics_result_mode=metrics_result_mode)
+    metric_b = DummyMetric()
+
+    engine_a = Engine(lambda e, b: b)
+    metric_a.attach(engine_a, "dummy_metric")
+
+    engine_b = Engine(lambda e, b: b)
+    metric_b.attach(engine_b, "dummy_metric")
+
+    state_a = engine_a.run([0], max_epochs=1)
+    state_b = engine_b.run([0], max_epochs=1)
+
+    assert state_a.metrics.keys() == state_b.metrics.keys()
+
+    assert state_a.metrics == state_b.metrics
 
 
 def test_state_metrics():
-
     y_pred = torch.randint(0, 2, size=(15, 10, 4)).float()
     y = torch.randint(0, 2, size=(15, 10, 4)).long()
 
@@ -342,7 +374,6 @@ def test_state_metrics():
 
 
 def test_state_metrics_ingredients_not_attached():
-
     y_pred = torch.randint(0, 2, size=(15, 10, 4)).float()
     y = torch.randint(0, 2, size=(15, 10, 4)).long()
 
@@ -371,7 +402,6 @@ def test_state_metrics_ingredients_not_attached():
 
 def test_recursive_attachment():
     def _test(composed_metric, metric_name, compute_true_value_fn):
-
         metrics = {
             metric_name: composed_metric,
         }
@@ -395,7 +425,7 @@ def test_recursive_attachment():
         d = data(y_pred, y)
         state = validator.run(d, max_epochs=1, epoch_length=y_pred.shape[0])
 
-        assert set(state.metrics.keys()) == set([metric_name,])
+        assert set(state.metrics.keys()) == set([metric_name])
         np_y_pred = y_pred.numpy().ravel()
         np_y = y.numpy().ravel()
         assert state.metrics[metric_name] == approx(compute_true_value_fn(np_y_pred, np_y))
@@ -435,31 +465,26 @@ def test_recursive_attachment():
 
 
 def _test_distrib_integration(device):
-
     rank = idist.get_rank()
-    np.random.seed(12)
 
     n_iters = 10
     batch_size = 10
     n_classes = 10
 
     def _test(metric_device):
-        y_true = np.arange(0, n_iters * batch_size * idist.get_world_size(), dtype="int64") % n_classes
-        y_pred = 0.2 * np.random.rand(n_iters * batch_size * idist.get_world_size(), n_classes)
-        for i in range(n_iters * batch_size * idist.get_world_size()):
+        y_true = torch.arange(0, n_iters * batch_size, dtype=torch.int64).to(device) % n_classes
+        y_pred = 0.2 * torch.rand(n_iters * batch_size, n_classes).to(device)
+        for i in range(n_iters * batch_size):
             if np.random.rand() > 0.4:
                 y_pred[i, y_true[i]] = 1.0
             else:
                 j = np.random.randint(0, n_classes)
                 y_pred[i, j] = 0.7
 
-        y_true = y_true.reshape(n_iters * idist.get_world_size(), batch_size)
-        y_pred = y_pred.reshape(n_iters * idist.get_world_size(), batch_size, n_classes)
-
         def update_fn(engine, i):
-            y_true_batch = y_true[i + rank * n_iters, ...]
-            y_pred_batch = y_pred[i + rank * n_iters, ...]
-            return torch.from_numpy(y_pred_batch), torch.from_numpy(y_true_batch)
+            y_true_batch = y_true[i * batch_size : (i + 1) * batch_size, ...]
+            y_pred_batch = y_pred[i * batch_size : (i + 1) * batch_size, ...]
+            return y_pred_batch, y_true_batch
 
         evaluator = Engine(update_fn)
 
@@ -467,7 +492,7 @@ def _test_distrib_integration(device):
         recall = Recall(average=False, device=metric_device)
 
         def Fbeta(r, p, beta):
-            return torch.mean((1 + beta ** 2) * p * r / (beta ** 2 * p + r)).item()
+            return torch.mean((1 + beta**2) * p * r / (beta**2 * p + r)).item()
 
         F1 = MetricsLambda(Fbeta, recall, precision, 1)
         F1.attach(evaluator, "f1")
@@ -478,13 +503,17 @@ def _test_distrib_integration(device):
         data = list(range(n_iters))
         state = evaluator.run(data, max_epochs=1)
 
+        y_pred = idist.all_gather(y_pred)
+        y_true = idist.all_gather(y_true)
+
         assert "f1" in state.metrics
         assert "ff1" in state.metrics
-        f1_true = f1_score(y_true.ravel(), np.argmax(y_pred.reshape(-1, n_classes), axis=-1), average="macro")
+        f1_true = f1_score(y_true.view(-1).cpu(), y_pred.view(-1, n_classes).argmax(dim=-1).cpu(), average="macro")
         assert f1_true == approx(state.metrics["f1"])
         assert 1.0 + f1_true == approx(state.metrics["ff1"])
 
-    for _ in range(3):
+    for i in range(3):
+        torch.manual_seed(12 + rank + i)
         _test("cpu")
         if device.type != "xla":
             _test(idist.device())
@@ -493,35 +522,50 @@ def _test_distrib_integration(device):
 def _test_distrib_metrics_on_diff_devices(device):
     n_classes = 10
     n_iters = 12
-    s = 16
-    offset = n_iters * s
+    batch_size = 16
     rank = idist.get_rank()
+    torch.manual_seed(12 + rank)
 
-    y_true = torch.randint(0, n_classes, size=(offset * idist.get_world_size(),)).to(device)
-    y_preds = torch.rand(offset * idist.get_world_size(), n_classes).to(device)
+    y_true = torch.randint(0, n_classes, size=(n_iters * batch_size,)).to(device)
+    y_preds = torch.rand(n_iters * batch_size, n_classes).to(device)
 
     def update(engine, i):
         return (
-            y_preds[i * s + rank * offset : (i + 1) * s + rank * offset],
-            y_true[i * s + rank * offset : (i + 1) * s + rank * offset],
+            y_preds[i * batch_size : (i + 1) * batch_size, :],
+            y_true[i * batch_size : (i + 1) * batch_size],
         )
+
+    evaluator = Engine(update)
 
     precision = Precision(average=False, device="cpu")
     recall = Recall(average=False, device=device)
-    custom_metric = precision * recall
 
-    engine = Engine(update)
-    custom_metric.attach(engine, "custom_metric")
+    def Fbeta(r, p, beta):
+        return torch.mean((1 + beta**2) * p * r / (beta**2 * p + r)).item()
+
+    F1 = MetricsLambda(Fbeta, recall, precision, 1)
+    F1.attach(evaluator, "f1")
+
+    another_f1 = (1.0 + precision * recall * 2 / (precision + recall + 1e-20)).mean().item()
+    another_f1.attach(evaluator, "ff1")
 
     data = list(range(n_iters))
-    engine.run(data, max_epochs=2)
+    state = evaluator.run(data, max_epochs=1)
+
+    y_preds = idist.all_gather(y_preds)
+    y_true = idist.all_gather(y_true)
+
+    assert "f1" in state.metrics
+    assert "ff1" in state.metrics
+    f1_true = f1_score(y_true.view(-1).cpu(), y_preds.view(-1, n_classes).argmax(dim=-1).cpu(), average="macro")
+    assert f1_true == approx(state.metrics["f1"])
+    assert 1.0 + f1_true == approx(state.metrics["ff1"])
 
 
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
 def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
-
     device = idist.device()
     _test_distrib_integration(device)
     _test_distrib_metrics_on_diff_devices(device)
@@ -530,7 +574,6 @@ def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
-
     device = idist.device()
     _test_distrib_integration(device)
 
@@ -539,7 +582,6 @@ def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
 @pytest.mark.skipif(not idist.has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_distrib_hvd(gloo_hvd_executor):
-
     device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
     nproc = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
 
@@ -551,7 +593,6 @@ def test_distrib_hvd(gloo_hvd_executor):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
-
     device = idist.device()
     _test_distrib_integration(device)
 
@@ -560,7 +601,6 @@ def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("GPU_MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_nccl_gpu(distributed_context_multi_node_nccl):
-
     device = idist.device()
     _test_distrib_integration(device)
     _test_distrib_metrics_on_diff_devices(device)

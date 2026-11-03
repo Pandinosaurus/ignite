@@ -27,7 +27,6 @@ class TransformedDataset(Dataset):
 
 
 class VOCSegmentationOpencv(VOCSegmentation):
-
     target_names = [
         "background",
         "aeroplane",
@@ -53,7 +52,7 @@ class VOCSegmentationOpencv(VOCSegmentation):
     ]
 
     def __init__(self, *args, return_meta=False, **kwargs):
-        super(VOCSegmentationOpencv, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.return_meta = return_meta
 
     def __getitem__(self, index):
@@ -66,7 +65,7 @@ class VOCSegmentationOpencv(VOCSegmentation):
             return {
                 "image": img,
                 "mask": mask,
-                "meta": {"index": index, "image_path": self.images[index], "mask_path": self.masks[index],},
+                "meta": {"index": index, "image_path": self.images[index], "mask_path": self.masks[index]},
             }
 
         return {"image": img, "mask": mask}
@@ -74,7 +73,7 @@ class VOCSegmentationOpencv(VOCSegmentation):
 
 class SBDatasetOpencv(SBDataset):
     def __init__(self, *args, return_meta=False, **kwargs):
-        super(SBDatasetOpencv, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         assert self.mode == "segmentation", "SBDatasetOpencv should be in segmentation mode only"
         self.return_meta = return_meta
 
@@ -93,7 +92,7 @@ class SBDatasetOpencv(SBDataset):
             return {
                 "image": img,
                 "mask": mask,
-                "meta": {"index": index, "image_path": self.images[index], "mask_path": self.masks[index],},
+                "meta": {"index": index, "image_path": self.images[index], "mask_path": self.masks[index]},
             }
 
         return {"image": img, "mask": mask}
@@ -101,12 +100,12 @@ class SBDatasetOpencv(SBDataset):
 
 def get_train_dataset(root_path, return_meta=False):
     return VOCSegmentationOpencv(
-        root=root_path, year="2012", image_set="train", download=False, return_meta=return_meta,
+        root=root_path, year="2012", image_set="train", download=False, return_meta=return_meta
     )
 
 
 def get_val_dataset(root_path, return_meta=False):
-    return VOCSegmentationOpencv(root=root_path, year="2012", image_set="val", download=False, return_meta=return_meta,)
+    return VOCSegmentationOpencv(root=root_path, year="2012", image_set="val", download=False, return_meta=return_meta)
 
 
 def get_train_noval_sbdataset(root_path, return_meta=False):
@@ -114,10 +113,9 @@ def get_train_noval_sbdataset(root_path, return_meta=False):
 
 
 def get_dataloader(dataset, sampler=None, shuffle=False, limit_num_samples=None, **kwargs):
-
     if limit_num_samples is not None:
-        np.random.seed(limit_num_samples)
-        indices = np.random.permutation(len(dataset))[:limit_num_samples]
+        g = torch.Generator().manual_seed(limit_num_samples)
+        indices = torch.randperm(len(dataset), generator=g)[:limit_num_samples]
         dataset = Subset(dataset, indices)
 
     return idist.auto_dataloader(dataset, sampler=sampler, shuffle=(sampler is None) and shuffle, **kwargs)
@@ -135,7 +133,6 @@ def get_train_val_loaders(
     limit_train_num_samples=None,
     limit_val_num_samples=None,
 ):
-
     train_ds = get_train_dataset(root_path)
     val_ds = get_val_dataset(root_path)
 
@@ -144,7 +141,8 @@ def get_train_val_loaders(
         train_ds = train_ds + sbd_train_ds
 
     if len(val_ds) < len(train_ds):
-        train_eval_indices = np.random.permutation(len(train_ds))[: len(val_ds)]
+        g = torch.Generator().manual_seed(len(train_ds))
+        train_eval_indices = torch.randperm(len(train_ds), generator=g)[: len(val_ds)]
         train_eval_ds = Subset(train_ds, train_eval_indices)
     else:
         train_eval_ds = train_ds
@@ -187,7 +185,7 @@ def get_train_val_loaders(
 
 
 def get_inference_dataloader(
-    root_path, mode, transforms, batch_size=16, num_workers=8, pin_memory=True, limit_num_samples=None,
+    root_path, mode, transforms, batch_size=16, num_workers=8, pin_memory=True, limit_num_samples=None
 ):
     assert mode in ("train", "test"), "Mode should be 'train' or 'test'"
 
@@ -206,7 +204,7 @@ def get_inference_dataloader(
     )
 
 
-def ignore_mask_boundaries(force_apply, **kwargs):
+def ignore_mask_boundaries(**kwargs):
     assert "mask" in kwargs, "Input should contain 'mask'"
     mask = kwargs["mask"]
     mask[mask == 255] = 0

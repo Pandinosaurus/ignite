@@ -1,10 +1,10 @@
 import json
-from typing import Callable, Collection, Dict, List, Optional, Union
+from collections.abc import Callable, Collection
+from typing import Literal
 
 import torch
 
 from ignite.metrics.fbeta import Fbeta
-from ignite.metrics.metric import Metric
 from ignite.metrics.metrics_lambda import MetricsLambda
 from ignite.metrics.precision import Precision
 from ignite.metrics.recall import Recall
@@ -16,9 +16,10 @@ def ClassificationReport(
     beta: int = 1,
     output_dict: bool = False,
     output_transform: Callable = lambda x: x,
-    device: Union[str, torch.device] = torch.device("cpu"),
+    device: str | torch.device = torch.device("cpu"),
     is_multilabel: bool = False,
-    labels: Optional[List[str]] = None,
+    labels: list[str] | None = None,
+    metrics_result_mode: Literal["flatten", "named", "both"] = "both",
 ) -> MetricsLambda:
     r"""Build a text report showing the main classification metrics. The report resembles in functionality to
     `scikit-learn classification_report
@@ -35,8 +36,18 @@ def ClassificationReport(
         is_multilabel: If True, the tensors are assumed to be multilabel.
         device: optional device specification for internal storage.
         labels: Optional list of label indices to include in the report
+        metrics_result_mode: specifies how to put the computed metrics results into
+            ``engine.state.metrics`` dictionary. Valid values are: "flatten", "named", "both".
+            - "flatten": if the computed result is a mapping, its keys/values are put directly into the engine state metrics dictionary
+            - "named": if the computed result is a mapping, the whole mapping is put into the engine state metrics dictionary under the metric name
+            - "both": combination of "flatten" and "named".
 
     Examples:
+
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
 
         Multiclass case
 
@@ -44,8 +55,8 @@ def ClassificationReport(
 
             metric = ClassificationReport(output_dict=True)
             metric.attach(default_evaluator, "cr")
-            y_true = torch.Tensor([2, 0, 2, 1, 0, 1]).long()
-            y_pred = torch.Tensor([
+            y_true = torch.tensor([2, 0, 2, 1, 0, 1])
+            y_pred = torch.tensor([
                 [0.0266, 0.1719, 0.3055],
                 [0.6886, 0.3978, 0.8176],
                 [0.9230, 0.0197, 0.8395],
@@ -74,20 +85,20 @@ def ClassificationReport(
 
             metric = ClassificationReport(output_dict=True, is_multilabel=True)
             metric.attach(default_evaluator, "cr")
-            y_true = torch.Tensor([
+            y_true = torch.tensor([
                 [0, 0, 1],
                 [0, 0, 0],
                 [0, 0, 0],
                 [1, 0, 0],
                 [0, 1, 1],
-            ]).unsqueeze(0)
-            y_pred = torch.Tensor([
+            ])
+            y_pred = torch.tensor([
                 [1, 1, 0],
                 [1, 0, 1],
                 [1, 0, 0],
                 [1, 0, 1],
                 [1, 1, 0],
-            ]).unsqueeze(0)
+            ])
             state = default_evaluator.run([[y_pred, y_true]])
             print(state.metrics["cr"].keys())
             print(state.metrics["cr"]["0"])
@@ -103,37 +114,38 @@ def ClassificationReport(
             {'precision': 0.0, 'recall': 0.0, 'f1-score': 0.0}
             {'precision': 0.2333..., 'recall': 0.6666..., 'f1-score': 0.3333...}
 
+    .. versionchanged:: 0.5.4
+        added ``metrics_result_mode`` argument.
     """
 
     # setup all the underlying metrics
-    precision = Precision(average=False, is_multilabel=is_multilabel, output_transform=output_transform, device=device,)
-    recall = Recall(average=False, is_multilabel=is_multilabel, output_transform=output_transform, device=device,)
+    precision = Precision(average=False, is_multilabel=is_multilabel, output_transform=output_transform, device=device)
+    recall = Recall(average=False, is_multilabel=is_multilabel, output_transform=output_transform, device=device)
     fbeta = Fbeta(beta, average=False, precision=precision, recall=recall)
     averaged_precision = precision.mean()
     averaged_recall = recall.mean()
     averaged_fbeta = fbeta.mean()
 
     def _wrapper(
-        recall_metric: Metric, precision_metric: Metric, f: Metric, a_recall: Metric, a_precision: Metric, a_f: Metric,
-    ) -> Union[Collection[str], Dict]:
-        p_tensor, r_tensor, f_tensor = precision_metric, recall_metric, f
-        if p_tensor.shape != r_tensor.shape:
+        re: torch.Tensor, pr: torch.Tensor, f: torch.Tensor, a_re: torch.Tensor, a_pr: torch.Tensor, a_f: torch.Tensor
+    ) -> Collection[str] | dict:
+        if pr.shape != re.shape:
             raise ValueError(
                 "Internal error: Precision and Recall have mismatched shapes: "
-                f"{p_tensor.shape} vs {r_tensor.shape}. Please, open an issue "
+                f"{pr.shape} vs {re.shape}. Please, open an issue "
                 "with a reference on this error. Thank you!"
             )
         dict_obj = {}
-        for idx, p_label in enumerate(p_tensor):
+        for idx, p_label in enumerate(pr):
             dict_obj[_get_label_for_class(idx)] = {
                 "precision": p_label.item(),
-                "recall": r_tensor[idx].item(),
-                "f{0}-score".format(beta): f_tensor[idx].item(),
+                "recall": re[idx].item(),
+                f"f{beta}-score": f[idx].item(),
             }
         dict_obj["macro avg"] = {
-            "precision": a_precision.item(),
-            "recall": a_recall.item(),
-            "f{0}-score".format(beta): a_f.item(),
+            "precision": a_pr.item(),
+            "recall": a_re.item(),
+            f"f{beta}-score": a_f.item(),
         }
         return dict_obj if output_dict else json.dumps(dict_obj)
 
@@ -141,4 +153,13 @@ def ClassificationReport(
     def _get_label_for_class(idx: int) -> str:
         return labels[idx] if labels else str(idx)
 
-    return MetricsLambda(_wrapper, recall, precision, fbeta, averaged_recall, averaged_precision, averaged_fbeta,)
+    return MetricsLambda(
+        _wrapper,
+        recall,
+        precision,
+        fbeta,
+        averaged_recall,
+        averaged_precision,
+        averaged_fbeta,
+        metrics_result_mode=metrics_result_mode,
+    )

@@ -1,6 +1,7 @@
 import torch
 
 import ignite.distributed as idist
+from ignite.distributed.comp_models.base import _torch_version_gt_112
 from tests.ignite.distributed.utils import (
     _sanity_check,
     _test_distrib__get_max_length,
@@ -8,15 +9,18 @@ from tests.ignite.distributed.utils import (
     _test_distrib_all_reduce,
     _test_distrib_barrier,
     _test_distrib_broadcast,
+    _test_distrib_group,
+    _test_idist_all_gather_tensors_with_shapes,
     _test_sync,
 )
 
 
 def test_no_distrib(capsys):
-
     assert idist.backend() is None
     if torch.cuda.is_available():
         assert idist.device().type == "cuda"
+    elif _torch_version_gt_112 and torch.backends.mps.is_available():
+        assert idist.device().type == "mps"
     else:
         assert idist.device().type == "cpu"
     assert idist.get_rank() == 0
@@ -38,6 +42,8 @@ def test_no_distrib(capsys):
     assert "ignite.distributed.utils INFO: backend: None" in out[-1]
     if torch.cuda.is_available():
         assert "ignite.distributed.utils INFO: device: cuda" in out[-1]
+    elif _torch_version_gt_112 and torch.backends.mps.is_available():
+        assert "ignite.distributed.utils INFO: device: mps" in out[-1]
     else:
         assert "ignite.distributed.utils INFO: device: cpu" in out[-1]
     assert "ignite.distributed.utils INFO: rank: 0" in out[-1]
@@ -65,11 +71,15 @@ def test_idist__model_methods_no_dist():
 def test_idist_collective_ops_no_dist():
     _test_distrib_all_reduce("cpu")
     _test_distrib_all_gather("cpu")
+    _test_idist_all_gather_tensors_with_shapes("cpu")
     _test_distrib_barrier("cpu")
     _test_distrib_broadcast("cpu")
+    _test_distrib_group("cpu")
 
     if torch.cuda.device_count() > 1:
         _test_distrib_all_reduce("cuda")
         _test_distrib_all_gather("cuda")
+        _test_idist_all_gather_tensors_with_shapes("cuda")
         _test_distrib_barrier("cuda")
         _test_distrib_broadcast("cuda")
+        _test_distrib_group("cuda")

@@ -1,9 +1,11 @@
+from pathlib import Path
+
 import pytest
 import torch
 import torch.distributed as dist
 
 import ignite.distributed as idist
-from ignite.distributed.utils import sync
+from ignite.distributed.utils import _rank_not_in_group, all_gather_tensors_with_shapes, sync
 from ignite.engine import Engine, Events
 
 
@@ -72,7 +74,6 @@ def _test_distrib__get_max_length(device):
 
 
 def _test_distrib_all_reduce(device):
-
     res = idist.all_reduce(10)
     assert res == 10 * idist.get_world_size()
 
@@ -119,56 +120,240 @@ def _test_distrib_all_reduce(device):
         assert res.device == t.device, f"{res.device} vs {t.device}"
 
 
+def _test_distrib_all_reduce_group(device):
+    assert idist.get_world_size() > 1, idist.get_world_size()
+    assert idist.backend() is not None, idist.backend()
+
+    ranks = sorted(range(idist.get_world_size() - 1, 0, -1))  # [0, 1, 2, 3] -> [3, 2, 1]
+    rank = idist.get_rank()
+    t = torch.tensor([rank], device=device)
+    bnd = idist.backend()
+
+    group = idist.new_group(ranks)
+    if bnd in ("horovod"):
+        with pytest.raises(NotImplementedError, match=r"all_reduce with group for horovod is not implemented"):
+            res = idist.all_reduce(t, group=group)
+    else:
+        if rank in ranks:
+            # we should call all_reduce with group on the participating ranks only
+            # otherwise a warning is raised:
+            # UserWarning: Running all_reduce on global rank 2 which does not belong to the given group.
+            res = idist.all_reduce(t, group=group)
+            assert res == torch.tensor([sum(ranks)], device=device)
+
+    t = torch.tensor([rank], device=device)
+    if bnd in ("horovod"):
+        with pytest.raises(NotImplementedError, match=r"all_reduce with group for horovod is not implemented"):
+            res = idist.all_reduce(t, group=ranks)
+    else:
+        if rank in ranks:
+            res = idist.all_reduce(t, group=ranks)
+            assert res == torch.tensor([sum(ranks)], device=device)
+
+    if bnd in ("nccl", "gloo", "mpi"):
+        with pytest.raises(ValueError, match=r"Argument group should be list of int or ProcessGroup"):
+            idist.all_reduce(t, group="abc")
+    elif bnd in ("xla-tpu"):
+        with pytest.raises(ValueError, match=r"Argument group should be list of int"):
+            idist.all_reduce(t, group="abc")
+    elif bnd in ("horovod"):
+        with pytest.raises(NotImplementedError, match=r"all_reduce with group for horovod is not implemented"):
+            idist.all_reduce(t, group="abc")
+
+
 def _test_distrib_all_gather(device):
+    rank = idist.get_rank()
+    ws = idist.get_world_size()
 
     res = torch.tensor(idist.all_gather(10), device=device)
-    true_res = torch.tensor([10,] * idist.get_world_size(), device=device)
+    true_res = torch.tensor([10] * ws, device=device)
     assert (res == true_res).all()
 
-    t = torch.tensor(idist.get_rank(), device=device)
+    t = torch.tensor(rank, device=device)
     res = idist.all_gather(t)
-    true_res = torch.tensor([i for i in range(idist.get_world_size())], device=device)
+    true_res = torch.tensor([i for i in range(ws)], device=device)
     assert (res == true_res).all()
 
     x = "test-test"
-    if idist.get_rank() == 0:
+    if rank == 0:
         x = "abc"
     res = idist.all_gather(x)
-    true_res = ["abc",] + ["test-test"] * (idist.get_world_size() - 1)
+    true_res = ["abc"] + ["test-test"] * (ws - 1)
     assert res == true_res
 
     base_x = "tests/ignite/distributed/utils/test_native.py" * 2000
     x = base_x
-    if idist.get_rank() == 0:
+    if rank == 0:
         x = "abc"
 
     res = idist.all_gather(x)
-    true_res = ["abc",] + [base_x] * (idist.get_world_size() - 1)
+    true_res = ["abc"] + [base_x] * (ws - 1)
     assert res == true_res
 
-    t = torch.arange(100, device=device).reshape(4, 25) * (idist.get_rank() + 1)
+    # Non-ASCII strings take more UTF-8 bytes than characters
+    x = "héllo wörld"
+    if rank == 0:
+        x = "日本語"
+    res = idist.all_gather(x)
+    true_res = ["日本語"] + ["héllo wörld"] * (ws - 1)
+    assert res == true_res
+
+    t = torch.arange(100, device=device).reshape(4, 25) * (rank + 1)
     in_dtype = t.dtype
     res = idist.all_gather(t)
-    assert res.shape == (idist.get_world_size() * 4, 25)
+    assert res.shape == (ws * 4, 25)
     assert res.dtype == in_dtype
-    true_res = torch.zeros(idist.get_world_size() * 4, 25, device=device)
-    for i in range(idist.get_world_size()):
+    true_res = torch.zeros(ws * 4, 25, device=device)
+    for i in range(ws):
         true_res[i * 4 : (i + 1) * 4, ...] = torch.arange(100, device=device).reshape(4, 25) * (i + 1)
     assert (res == true_res).all()
 
-    if idist.get_world_size() > 1:
-        with pytest.raises(TypeError, match=r"Unhandled input type"):
-            idist.all_reduce([0, 1, 2])
+    if ws > 1 and idist.backend() != "xla-tpu":
+        t = {
+            "a": [rank + 1, rank + 2, torch.tensor(rank + 3, device=device)],
+            "b": torch.tensor([[rank + 1, rank + 2, rank + 3]], device=device),
+            "c": {"abcd": rank, "cdfg": torch.tensor(rank, dtype=torch.uint8, device=device)},
+        }
+        res = idist.all_gather(t)
+        assert isinstance(res, list) and len(res) == ws
+        for i, obj in enumerate(res):
+            assert isinstance(obj, dict)
+            assert list(obj.keys()) == ["a", "b", "c"], obj
+            expected_device = (
+                device if torch.device(device).type == "cpu" else torch.device(f"{torch.device(device).type}:{i}")
+            )
+            expected = {
+                "a": [i + 1, i + 2, torch.tensor(i + 3, device=expected_device)],
+                "b": torch.tensor([[i + 1, i + 2, i + 3]], device=expected_device),
+                "c": {"abcd": i, "cdfg": torch.tensor(i, dtype=torch.uint8, device=expected_device)},
+            }
+            assert obj["a"] == expected["a"]
+            assert (obj["b"] == expected["b"]).all()
+            assert obj["c"] == expected["c"]
+
+
+def _test_distrib_all_gather_group(device):
+    assert idist.get_world_size() > 1, idist.get_world_size()
+
+    ranks = sorted(range(idist.get_world_size() - 1, 0, -1))  # [0, 1, 2, 3] -> [3, 2, 1]
+    rank = idist.get_rank()
+    bnd = idist.backend()
+
+    t = torch.tensor([rank], device=device)
+    group = idist.new_group(ranks)
+    res = idist.all_gather(t, group=group)
+    if rank in ranks:
+        assert torch.equal(res, torch.tensor(ranks, device=device))
+    else:
+        assert res == t
+
+    t = torch.tensor([rank], device=device)
+    if bnd == "horovod":
+        res = idist.all_gather(t, group=group)
+    else:
+        res = idist.all_gather(t, group=ranks)
+    if rank in ranks:
+        assert torch.equal(res, torch.tensor(ranks, device=device))
+    else:
+        assert res == t
+
+    t = {
+        "a": [rank + 1, rank + 2, torch.tensor(rank + 3, device=device)],
+        "b": torch.tensor([[rank + 1, rank + 2, rank + 3]], device=device),
+        "c": {"abcd": rank, "cdfg": torch.tensor(rank, dtype=torch.uint8, device=device)},
+    }
+    if bnd in ("xla-tpu"):
+        with pytest.raises(NotImplementedError, match=r"all_gather on object is not implemented for xla"):
+            res = idist.all_gather(t, group=ranks)
+    elif bnd in ("horovod"):
+        with pytest.raises(NotImplementedError, match=r"all_gather with group for horovod is not implemented"):
+            res = idist.all_gather(t, group=group)
+    else:
+        res = idist.all_gather(t, group=ranks)
+        if rank in ranks:
+            assert isinstance(res, list) and len(res) == len(ranks)
+            for i, obj in zip(ranks, res):
+                assert isinstance(obj, dict)
+                assert list(obj.keys()) == ["a", "b", "c"], obj
+                expected_device = (
+                    device if torch.device(device).type == "cpu" else torch.device(f"{torch.device(device).type}:{i}")
+                )
+                expected = {
+                    "a": [i + 1, i + 2, torch.tensor(i + 3, device=expected_device)],
+                    "b": torch.tensor([[i + 1, i + 2, i + 3]], device=expected_device),
+                    "c": {"abcd": i, "cdfg": torch.tensor(i, dtype=torch.uint8, device=expected_device)},
+                }
+                assert obj["a"] == expected["a"], (obj, expected)
+                assert (obj["b"] == expected["b"]).all(), (obj, expected)
+                assert obj["c"] == expected["c"], (obj, expected)
+        else:
+            assert res == t
+
+    t = torch.tensor([rank], device=device)
+    if bnd in ("nccl", "gloo", "mpi", "horovod"):
+        with pytest.raises(ValueError, match=r"Argument group should be list of int"):
+            res = idist.all_gather(t, group="abc")
+    elif bnd in ("xla-tpu"):
+        with pytest.raises(ValueError, match=r"Argument group should be list of int"):
+            res = idist.all_gather(t, group="abc")
+
+
+def _test_idist_all_gather_tensors_with_shapes(device):
+    torch.manual_seed(41)
+    rank = idist.get_rank()
+    ws = idist.get_world_size()
+    reference = torch.randn(ws * 5, ws * 5, ws * 5, device=device)
+    rank_tensor = reference[
+        rank * (rank + 1) // 2 : rank * (rank + 1) // 2 + rank + 1,
+        rank * (rank + 3) // 2 : rank * (rank + 3) // 2 + rank + 2,
+        rank * (rank + 5) // 2 : rank * (rank + 5) // 2 + rank + 3,
+    ]
+    tensors = all_gather_tensors_with_shapes(rank_tensor, [[r + 1, r + 2, r + 3] for r in range(ws)])
+    for r in range(ws):
+        r_tensor = reference[
+            r * (r + 1) // 2 : r * (r + 1) // 2 + r + 1,
+            r * (r + 3) // 2 : r * (r + 3) // 2 + r + 2,
+            r * (r + 5) // 2 : r * (r + 5) // 2 + r + 3,
+        ]
+        assert r_tensor.allclose(tensors[r])
+
+
+def _test_idist_all_gather_tensors_with_shapes_group(device):
+    assert idist.get_world_size(), idist.get_world_size()
+    torch.manual_seed(41)
+
+    rank = idist.get_rank()
+    ranks = sorted(range(idist.get_world_size() - 1, 0, -1))  # [0, 1, 2, 3] -> [1, 2, 3]
+    ws = idist.get_world_size()
+    if rank in ranks:
+        reference = torch.randn(ws * 5, ws * 5, ws * 5, device=device)
+        rank_tensor = reference[
+            rank * (rank + 1) // 2 : rank * (rank + 1) // 2 + rank + 1,
+            rank * (rank + 3) // 2 : rank * (rank + 3) // 2 + rank + 2,
+            rank * (rank + 5) // 2 : rank * (rank + 5) // 2 + rank + 3,
+        ]
+    else:
+        rank_tensor = torch.tensor([rank], device=device)
+
+    tensors = all_gather_tensors_with_shapes(rank_tensor, [[r + 1, r + 2, r + 3] for r in ranks], ranks)
+    if rank in ranks:
+        for i, r in enumerate(ranks):
+            r_tensor = reference[
+                r * (r + 1) // 2 : r * (r + 1) // 2 + r + 1,
+                r * (r + 3) // 2 : r * (r + 3) // 2 + r + 2,
+                r * (r + 5) // 2 : r * (r + 5) // 2 + r + 3,
+            ]
+            assert r_tensor.allclose(tensors[i])
+    else:
+        assert [rank_tensor] == tensors
 
 
 def _test_distrib_broadcast(device):
-
     rank = idist.get_rank()
     ws = idist.get_world_size()
 
     def _test(data_src, data_others, safe_mode):
         for src in range(ws):
-
             data = data_src if rank == src else data_others
             res = idist.broadcast(data, src=src, safe_mode=safe_mode)
 
@@ -189,6 +374,15 @@ def _test_distrib_broadcast(device):
     _test("test-abcdefg", "", safe_mode=False)
     _test("test-abcdefg", None, safe_mode=True)
     _test("test-abcdefg", 1.2, safe_mode=True)
+
+    _test("héllo-日本語", "", safe_mode=False)
+    _test("héllo-日本語", None, safe_mode=True)
+    _test(Path("checkpoints/modèle"), Path(""), safe_mode=False)
+
+    path = Path("tests/ignite/distributed/utils/test_horovod.py")
+    _test(path, Path(""), safe_mode=False)
+    _test(path, None, safe_mode=True)
+    _test(path, "", safe_mode=True)
 
     s = "tests/ignite/distributed/utils/test_horovod.py::test_idist_broadcast_hvd" * 200
     _test(s, "", safe_mode=False)
@@ -216,7 +410,6 @@ def _test_distrib_broadcast(device):
 
 
 def _test_distrib_barrier(device):
-
     t = torch.tensor([idist.get_rank()], device=device, dtype=torch.float)
     true_res = sum([i for i in range(idist.get_world_size())])
 
@@ -228,6 +421,41 @@ def _test_distrib_barrier(device):
     assert tt.item() == true_res + 10.0
 
 
+def _test_distrib_group(device):
+    ranks = sorted(range(idist.get_world_size() - 1, 0, -1))  # [0, 1, 2, 3] -> [1, 2, 3]
+    if idist.get_world_size() > 1 and idist.backend() is not None:
+        bnd = idist.backend()
+        rank = idist.get_rank()
+        g = idist.new_group(ranks)
+        if idist.has_native_dist_support and bnd in ("nccl", "gloo", "mpi"):
+            if rank in ranks:
+                # mapping between group ranks and global ranks
+                global_to_group = {r: i for i, r in enumerate(ranks)}
+                assert g.rank() == global_to_group[rank], (g.rank(), global_to_group, rank)
+
+        elif idist.has_xla_support and bnd in ("xla-tpu"):
+            assert g == [ranks]
+        elif idist.has_hvd_support and bnd in ("horovod"):
+            if rank in ranks:
+                assert g.ranks == ranks
+
+        if rank in ranks:
+            assert not _rank_not_in_group(g)
+        else:
+            assert _rank_not_in_group(g)
+
+    elif idist.backend() is None:
+        assert idist.new_group(ranks) == ranks
+
+    with pytest.raises(ValueError, match="Argument ranks should be list of int"):
+        ranks = ["a", "b", "c"]
+        idist.new_group(ranks)
+
+    with pytest.raises(ValueError, match="Argument ranks should be list of int"):
+        ranks = 1
+        idist.new_group(ranks)
+
+
 def _test_distrib_one_rank_only(device):
     def _test(barrier):
         # last rank
@@ -237,7 +465,7 @@ def _test_distrib_one_rank_only(device):
 
         @idist.one_rank_only(rank=rank, with_barrier=barrier)
         def initialize():
-            value.data = torch.tensor(100).to(device)
+            value.add_(torch.tensor(100).to(device))
 
         initialize()
 

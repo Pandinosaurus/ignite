@@ -19,11 +19,10 @@ def mock_no_scipy():
 
 
 def test_no_scipy(mock_no_scipy):
-
-    with pytest.raises(RuntimeError, match=r"This module requires scipy to be installed."):
+    with pytest.raises(ModuleNotFoundError, match=r"This module requires scipy to be installed."):
         FID()
 
-    with pytest.raises(RuntimeError, match=r"fid_score requires scipy to be installed."):
+    with pytest.raises(ModuleNotFoundError, match=r"fid_score requires scipy to be installed."):
         fid_score(0, 0, 0, 0)
 
 
@@ -34,11 +33,10 @@ def mock_no_numpy():
 
 
 def test_no_numpy(mock_no_numpy):
-
-    with pytest.raises(RuntimeError, match=r"This module requires numpy to be installed."):
+    with pytest.raises(ModuleNotFoundError, match=r"This module requires numpy to be installed."):
         FID()
 
-    with pytest.raises(RuntimeError, match=r"fid_score requires numpy to be installed."):
+    with pytest.raises(ModuleNotFoundError, match=r"fid_score requires numpy to be installed."):
         fid_score(0, 0, 0, 0)
 
 
@@ -55,18 +53,23 @@ def test_fid_function():
     )
 
 
-def test_compute_fid_from_features():
+def test_compute_fid_from_features(available_device):
     train_samples, test_samples = torch.rand(10, 10), torch.rand(10, 10)
 
-    fid_scorer = FID(num_features=10, feature_extractor=torch.nn.Identity())
+    fid_scorer = FID(
+        num_features=10,
+        feature_extractor=torch.nn.Identity(),
+        device=available_device,
+    )
     fid_scorer.update([train_samples[:5], test_samples[:5]])
     fid_scorer.update([train_samples[5:], test_samples[5:]])
 
     mu1, sigma1 = train_samples.mean(axis=0), cov(train_samples, rowvar=False)
     mu2, sigma2 = test_samples.mean(axis=0), cov(test_samples, rowvar=False)
 
+    tol = 5e-4 if available_device == "mps" else 1e-5
     assert (
-        pytest.approx(pytorch_fid_score.calculate_frechet_distance(mu1, sigma1, mu2, sigma2), rel=1e-5)
+        pytest.approx(pytorch_fid_score.calculate_frechet_distance(mu1, sigma1, mu2, sigma2), abs=tol)
         == fid_scorer.compute()
     )
 
@@ -105,12 +108,11 @@ def test_compute_fid_sqrtm():
 
 
 def test_wrong_inputs():
-
     with pytest.raises(ValueError, match=r"Argument num_features must be greater to zero"):
         FID(num_features=-1, feature_extractor=torch.nn.Identity())
 
     with pytest.raises(ValueError, match=r"feature_extractor output must be a tensor of dim 2, got: 1"):
-        FID(num_features=1, feature_extractor=torch.nn.Identity()).update(torch.Tensor([[], []]))
+        FID(num_features=1, feature_extractor=torch.nn.Identity()).update(torch.tensor([[], []]))
 
     with pytest.raises(ValueError, match=r"Batch size should be greater than one, got: 0"):
         FID(num_features=1, feature_extractor=torch.nn.Identity()).update(torch.rand(2, 0, 0))
@@ -121,9 +123,7 @@ def test_wrong_inputs():
     err_str = (
         "Number of Training Features and Testing Features should be equal (torch.Size([9, 2]) != torch.Size([5, 2]))"
     )
-    with pytest.raises(
-        ValueError, match=re.escape(err_str),
-    ):
+    with pytest.raises(ValueError, match=re.escape(err_str)):
         FID(num_features=2, feature_extractor=torch.nn.Identity()).update((torch.rand(9, 2), torch.rand(5, 2)))
 
     with pytest.raises(TypeError, match=r"Argument feature_extractor must be of type torch.nn.Module"):
@@ -133,14 +133,20 @@ def test_wrong_inputs():
         FID(feature_extractor=torch.nn.Identity())
 
 
-def test_statistics():
+def test_statistics(available_device):
     train_samples, test_samples = torch.rand(10, 10), torch.rand(10, 10)
-    fid_scorer = FID(num_features=10, feature_extractor=torch.nn.Identity())
+    fid_scorer = FID(
+        num_features=10,
+        feature_extractor=torch.nn.Identity(),
+        device=available_device,
+    )
     fid_scorer.update([train_samples[:5], test_samples[:5]])
     fid_scorer.update([train_samples[5:], test_samples[5:]])
 
-    mu1, sigma1 = train_samples.mean(axis=0), torch.tensor(cov(train_samples, rowvar=False))
-    mu2, sigma2 = test_samples.mean(axis=0), torch.tensor(cov(test_samples, rowvar=False))
+    mu1 = train_samples.mean(axis=0, dtype=torch.float64)
+    sigma1 = torch.tensor(cov(train_samples, rowvar=False), dtype=torch.float64)
+    mu2 = test_samples.mean(axis=0, dtype=torch.float64)
+    sigma2 = torch.tensor(cov(test_samples, rowvar=False), dtype=torch.float64)
 
     fid_mu1 = fid_scorer._train_total / fid_scorer._num_examples
     fid_sigma1 = fid_scorer._get_covariance(fid_scorer._train_sigma, fid_scorer._train_total)
@@ -148,17 +154,14 @@ def test_statistics():
     fid_mu2 = fid_scorer._test_total / fid_scorer._num_examples
     fid_sigma2 = fid_scorer._get_covariance(fid_scorer._test_sigma, fid_scorer._test_total)
 
-    assert torch.isclose(mu1.double(), fid_mu1).all()
-    for cov1, cov2 in zip(sigma1, fid_sigma1):
-        assert torch.isclose(cov1.double(), cov2, rtol=1e-04, atol=1e-04).all()
+    assert torch.allclose(mu1, fid_mu1.cpu().to(dtype=mu1.dtype))
+    assert torch.allclose(sigma1, fid_sigma1.cpu().to(dtype=sigma1.dtype), rtol=1e-04, atol=1e-04)
 
-    assert torch.isclose(mu2.double(), fid_mu2).all()
-    for cov1, cov2 in zip(sigma2, fid_sigma2):
-        assert torch.isclose(cov1.double(), cov2, rtol=1e-04, atol=1e-04).all()
+    assert torch.allclose(mu2, fid_mu2.cpu().to(dtype=mu2.dtype))
+    assert torch.allclose(sigma2, fid_sigma2.cpu().to(dtype=mu2.dtype), rtol=1e-04, atol=1e-04)
 
 
 def _test_distrib_integration(device):
-
     from ignite.engine import Engine
 
     rank = idist.get_rank()
@@ -220,7 +223,6 @@ def test_distrib_cpu(distributed_context_single_node_gloo):
 @pytest.mark.skipif(not idist.has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_distrib_hvd(gloo_hvd_executor):
-
     device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
     nproc = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
 

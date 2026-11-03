@@ -2,15 +2,16 @@ import argparse
 import os
 import random
 import warnings
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
 
-from ignite.contrib.handlers import ProgressBar
 from ignite.engine import Engine, Events
-from ignite.handlers import ModelCheckpoint, Timer
+
+from ignite.handlers import ModelCheckpoint, ProgressBar, Timer
 from ignite.metrics import RunningAverage
 
 try:
@@ -19,7 +20,7 @@ try:
     import torchvision.utils as vutils
 
 except ImportError:
-    raise ImportError(
+    raise ModuleNotFoundError(
         "Please install torchvision to run this example, for example "
         "via conda by running 'conda install -c pytorch torchvision'. "
     )
@@ -35,7 +36,7 @@ CKPT_PREFIX = "networks"
 
 
 class Net(nn.Module):
-    """ A base class for both generator and the discriminator.
+    """A base class for both generator and the discriminator.
     Provides a common weight initialization scheme.
 
     """
@@ -56,14 +57,14 @@ class Net(nn.Module):
 
 
 class Generator(Net):
-    """ Generator network.
+    """Generator network.
 
     Args:
         nf (int): Number of filters in the second-to-last deconv layer
     """
 
     def __init__(self, z_dim, nf, nc):
-        super(Generator, self).__init__()
+        super().__init__()
 
         self.net = nn.Sequential(
             # input is Z, going into a convolution
@@ -84,7 +85,7 @@ class Generator(Net):
             nn.ReLU(inplace=True),
             # state size. (nf) x 32 x 32
             nn.ConvTranspose2d(in_channels=nf, out_channels=nc, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.Tanh()
+            nn.Tanh(),
             # state size. (nc) x 64 x 64
         )
 
@@ -95,14 +96,14 @@ class Generator(Net):
 
 
 class Discriminator(Net):
-    """ Discriminator network.
+    """Discriminator network.
 
     Args:
         nf (int): Number of filters in the first conv layer.
     """
 
     def __init__(self, nc, nf):
-        super(Discriminator, self).__init__()
+        super().__init__()
 
         self.net = nn.Sequential(
             # input is (nc) x 64 x 64
@@ -133,9 +134,7 @@ class Discriminator(Net):
 
 
 def check_manual_seed(seed):
-    """ If manual seed is not specified, choose a random one and communicate it to the user.
-
-    """
+    """If manual seed is not specified, choose a random one and communicate it to the user."""
 
     seed = seed or random.randint(1, 10000)
     random.seed(seed)
@@ -208,7 +207,6 @@ def main(
     alpha,
     output_dir,
 ):
-
     # seed
     check_manual_seed(seed)
 
@@ -244,7 +242,6 @@ def main(
 
     # The main function, processing a batch of examples
     def step(engine, batch):
-
         # unpack the batch. It comes from a dataset, so we have <images, labels> pairs. Discard labels.
         real, _ = batch
         real = real.to(device)
@@ -310,9 +307,9 @@ def main(
 
     @trainer.on(Events.ITERATION_COMPLETED(every=PRINT_FREQ))
     def print_logs(engine):
-        fname = os.path.join(output_dir, LOGS_FNAME)
-        columns = ["iteration",] + list(engine.state.metrics.keys())
-        values = [str(engine.state.iteration),] + [str(round(value, 5)) for value in engine.state.metrics.values()]
+        fname = output_dir / LOGS_FNAME
+        columns = ["iteration"] + list(engine.state.metrics.keys())
+        values = [str(engine.state.iteration)] + [str(round(value, 5)) for value in engine.state.metrics.values()]
 
         with open(fname, "a") as f:
             if f.tell() == 0:
@@ -328,14 +325,14 @@ def main(
     @trainer.on(Events.EPOCH_COMPLETED)
     def save_fake_example(engine):
         fake = netG(fixed_noise)
-        path = os.path.join(output_dir, FAKE_IMG_FNAME.format(engine.state.epoch))
+        path = output_dir / FAKE_IMG_FNAME.format(engine.state.epoch)
         vutils.save_image(fake.detach(), path, normalize=True)
 
     # adding handlers using `trainer.on` decorator API
     @trainer.on(Events.EPOCH_COMPLETED)
     def save_real_example(engine):
         img, y = engine.state.batch
-        path = os.path.join(output_dir, REAL_IMG_FNAME.format(engine.state.epoch))
+        path = output_dir / REAL_IMG_FNAME.format(engine.state.epoch)
         vutils.save_image(img, path, normalize=True)
 
     # adding handlers using `trainer.add_event_handler` method API
@@ -373,11 +370,11 @@ def main(
             warnings.warn("Loss plots will not be generated -- pandas or matplotlib not found")
 
         else:
-            df = pd.read_csv(os.path.join(output_dir, LOGS_FNAME), delimiter="\t", index_col="iteration")
+            df = pd.read_csv(output_dir / LOGS_FNAME, delimiter="\t", index_col="iteration")
             _ = df.plot(subplots=True, figsize=(20, 20))
             _ = plt.xlabel("Iteration number")
             fig = plt.gcf()
-            path = os.path.join(output_dir, PLOT_FNAME)
+            path = output_dir / PLOT_FNAME
 
             fig.savefig(path)
 
@@ -443,10 +440,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     dev = "cpu" if (not torch.cuda.is_available() or args.no_cuda) else "cuda:0"
 
+    args.output_dir = Path(args.output_dir)
     try:
-        os.makedirs(args.output_dir)
+        args.output_dir.mkdir(parents=True)
     except FileExistsError:
-        if (not os.path.isdir(args.output_dir)) or (len(os.listdir(args.output_dir)) > 0):
+        if (not args.output_dir.is_dir()) or (len(os.listdir(args.output_dir)) > 0):
             raise FileExistsError("Please provide a path to a non-existing or empty directory.")
 
     main(

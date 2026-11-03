@@ -20,10 +20,18 @@ fi
 
 set -xeu
 
-conda install -y conda-build conda-verify anaconda-client
+# Set version in meta.yaml
+version=$(sed -nE 's/__version__ = "(.*)"/\1/p' ignite/__init__.py)
+sed -i "s/__version__ = \"\(.*\)\"/__version__ = \"$version\"/g" conda.recipe/meta.yaml
+cat conda.recipe/meta.yaml | grep version
+
+conda install -n base -y conda-build
+conda install -y anaconda-client conda-package-handling
 conda config --set anaconda_upload no
 
-conda build --no-test --output-folder conda_build conda.recipe -c pytorch
+conda build --no-test --output-folder conda_build conda.recipe -c pytorch --package-format 1
+cph transmute $(ls conda_build/*/*.tar.bz2) .conda
 
 # Upload to Anaconda
-ls conda_build/*/*.tar.bz2 | xargs -I {} anaconda -v -t $ANACONDA_TOKEN upload -u $UPLOAD_USER {}
+conda config --set anaconda_upload yes
+ls conda_build/*/*.{conda,tar.bz2} | xargs -I {} anaconda -v -t $ANACONDA_TOKEN upload -u $UPLOAD_USER {}

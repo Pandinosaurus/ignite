@@ -5,7 +5,9 @@ from PIL import Image
 try:
     from image_dataset_viz import render_datapoint
 except ImportError:
-    raise RuntimeError("Install it via pip install --upgrade git+https://github.com/vfdev-5/ImageDatasetViz.git")
+    raise ModuleNotFoundError(
+        "Please install image-dataset-viz via pip install --upgrade git+https://github.com/vfdev-5/ImageDatasetViz.git"
+    )
 
 
 def _getvocpallete(num_cls):
@@ -119,11 +121,11 @@ def predictions_gt_images_handler(img_denormalize_fn, n_images=None, another_eng
         grid_pred_gt = make_grid(x, y_pred, img_denormalize_fn, batch_gt_mask=y)
 
         state = engine.state if another_engine is None else another_engine.state
-        global_step = state.get_event_attrib_value(event_name)
+        global_step = state.epoch
 
         tag = "predictions_with_gt"
         if prefix_tag is not None:
-            tag = f"{prefix_tag}: {tag}"
+            tag = f"{prefix_tag}: {tag} - epoch={global_step}"
         logger.writer.add_image(tag=tag, img_tensor=grid_pred_gt, global_step=global_step, dataformats="HWC")
 
     return wrapper

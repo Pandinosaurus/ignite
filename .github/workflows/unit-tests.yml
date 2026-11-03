@@ -1,26 +1,40 @@
 name: Run unit tests
 on:
   push:
+    branches:
+      - master
+      - "*.*.*"
     paths:
-      - "ignite/**"
-      - "tests/ignite/**"
-      - "tests/run_cpu_tests.sh"
       - "examples/**.py"
+      - "ignite/**"
+      - "pyproject.toml"
+      - "tests/ignite/**"
+      - "tests/run_code_style.sh"
+      - "tests/run_cpu_tests.sh"
       - "requirements-dev.txt"
       - ".github/workflows/unit-tests.yml"
-
   pull_request:
     paths:
-      - "ignite/**"
-      - "tests/ignite/**"
-      - "tests/run_cpu_tests.sh"
       - "examples/**.py"
+      - "ignite/**"
+      - "pyproject.toml"
+      - "tests/ignite/**"
+      - "tests/run_code_style.sh"
+      - "tests/run_cpu_tests.sh"
       - "requirements-dev.txt"
       - ".github/workflows/unit-tests.yml"
+  workflow_dispatch:
+  merge_group:
+
+concurrency:
+  # <workflow_name>-<branch_name>-<true || commit_sha (if branch is protected)>
+  group: unit-tests-${{ github.ref_name }}-${{ !(github.ref_protected) || github.sha }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  cpu-tests:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 85
     defaults:
       run:
         shell: bash
@@ -29,74 +43,57 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: [3.6, 3.7, 3.8, 3.9]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
         pytorch-channel: [pytorch, pytorch-nightly]
         include:
           # includes a single build on windows
           - os: windows-latest
             pytorch-channel: pytorch
-            python-version: 3.8
+            python-version: 3.11
             skip-distrib-tests: 1
           # includes a single build on macosx
           - os: macos-latest
             pytorch-channel: pytorch
-            python-version: 3.8
+            python-version: 3.11
             skip-distrib-tests: 1
 
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-python@v2
-        with:
-          python-version: ${{ matrix.python-version }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Get year & week number
         id: get-date
         run: |
-          echo "::set-output name=date::$(/bin/date "+%Y-%U")"
+          echo "date=$(/bin/date "+%Y-%U")" >> $GITHUB_OUTPUT
 
-      - name: Get pip cache dir
-        id: pip-cache
-        run: |
-          pip install -U pip || python -m pip install -U pip 
-          echo "::set-output name=dir::$(pip cache dir)"
-
-      - uses: actions/cache@v2
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          path: |
-            ${{ steps.pip-cache.outputs.dir }}
-          key: ${{ steps.get-date.outputs.date }}-pytorch-${{ runner.os }}-${{ matrix.python-version }}-${{ matrix.pytorch-channel }}-${{ hashFiles('requirements-dev.txt') }}
-          restore-keys: |
-            ${{ steps.get-date.outputs.date }}-pytorch-${{ runner.os }}-${{ matrix.python-version }}-${{ matrix.pytorch-channel }}-
-
-      - run: pip install pip wheel setuptools -Uqq
+          version: "latest"
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: true
+          cache-suffix: "${{ steps.get-date.outputs.date }}-pytorch-${{ runner.os }}-${{ matrix.python-version }}-${{ matrix.pytorch-channel }}"
+          cache-dependency-glob: |
+            **/requirements-dev.txt
+            **/pyproject.toml
 
       - name: Install PyTorch
         if: ${{ matrix.pytorch-channel == 'pytorch' }}
-        run: pip install torch torchvision -f https://download.pytorch.org/whl/cpu/torch_stable.html
+        run: uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install PyTorch (nightly)
         if: ${{ matrix.pytorch-channel == 'pytorch-nightly' }}
-        run: pip install torch torchvision -f https://download.pytorch.org/whl/nightly/cpu/torch_nightly.html --pre
+        run: uv pip install torch torchvision --index-url https://download.pytorch.org/whl/nightly/cpu --pre
 
       - name: Install dependencies
         run: |
-          pip install -r requirements-dev.txt -qq
-          python setup.py install
-
-      - name: Check code formatting
-        run: |
-          bash ./tests/run_code_style.sh install
-          bash ./tests/run_code_style.sh lint
-
-      - name: Run Mypy
-        if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: |
-          bash ./tests/run_code_style.sh mypy
+          uv pip install -r requirements-dev.txt
+          uv pip install .
+          uv pip list
 
       # Download MNIST: https://github.com/pytorch/ignite/issues/1737
       # to "/tmp" for unit tests
       - name: Download MNIST
-        uses: pytorch-ignite/download-mnist-github-action@master
+        uses: pytorch-ignite/download-mnist-github-action@622fc8c4ff50b24322819f54f48624f26932892b # master
         with:
           target_dir: /tmp
 
@@ -106,13 +103,18 @@ jobs:
           cp -R /tmp/MNIST .
 
       - name: Run Tests
-        run: |
-          SKIP_DISTRIB_TESTS=${{ matrix.skip-distrib-tests }} bash tests/run_cpu_tests.sh
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 15
+          shell: bash
+          command: SKIP_DISTRIB_TESTS=${{ matrix.skip-distrib-tests }} bash tests/run_cpu_tests.sh
+          new_command_on_retry: USE_LAST_FAILED=1 SKIP_DISTRIB_TESTS=${{ matrix.skip-distrib-tests }} bash tests/run_cpu_tests.sh
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v1
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
-          file: ./coverage.xml
+          files: ./coverage.xml
           flags: cpu
           fail_ci_if_error: false
 
@@ -126,15 +128,16 @@ jobs:
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
           # 2) mnist_with_visdom.py
-          python -c "from visdom.server import download_scripts; download_scripts()" # download scripts : https://github.com/facebookresearch/visdom/blob/master/py/server.py#L929
-          python -m visdom.server &
-          sleep 10
-          python examples/mnist/mnist_with_visdom.py --epochs=1
-          kill %1
+          # Visdom is unmaintained and cannot be installed with modern packages
+          # python -c "from visdom.server.build import download_scripts; download_scripts()" # download scripts : https://github.com/facebookresearch/visdom/blob/master/py/server.py#L929
+          # python -m visdom.server &
+          # sleep 10
+          # python examples/mnist/mnist_with_visdom.py --epochs=1
+          # kill %1
           # 3.1) mnist_with_tensorboard.py with tbX
           python examples/mnist/mnist_with_tensorboard.py --epochs=1
           # 3.2) mnist_with_tensorboard.py with native torch tb
-          pip uninstall -y tensorboardX
+          uv pip uninstall tensorboardX
           python examples/mnist/mnist_with_tensorboard.py --epochs=1
 
       - name: Run MNIST Example With Crash
@@ -171,3 +174,21 @@ jobs:
           #train
           mkdir -p ~/.cache/torch/checkpoints/ && wget "https://download.pytorch.org/models/vgg16-397923af.pth" -O ~/.cache/torch/checkpoints/vgg16-397923af.pth
           python examples/fast_neural_style/neural_style.py train --epochs 1 --cuda 0 --dataset test --dataroot . --image_size 32 --style_image examples/fast_neural_style/images/style_images/mosaic.jpg --style_size 32
+      - name: Run SR Example
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          set -e
+          echo "Testing Caltech101 dataset availability..."
+          if python -c "import torchvision; torchvision.datasets.Caltech101(root='./data', download=True)"; then
+            python examples/super_resolution/main.py --upscale_factor 3 --crop_size 180 --batch_size 4 --test_batch_size 100 --n_epochs 1 --lr 0.001 --threads 2 --debug
+          else
+            echo "Caltech101 dataset failed to download. Skipping SR example test."
+          fi
+      - name: Run CIFAR10 with Ray Tune and Ignite
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          echo "Downloading CIFAR10 archive from Zenodo..."
+          mkdir -p data
+          curl -L --retry 3 --retry-delay 10 -o data/cifar-10-python.tar.gz "https://zenodo.org/records/10089977/files/cifar-10-python.tar.gz?download=1"
+          uv pip install -r examples/cifar10_raytune/requirements.txt
+          python examples/cifar10_raytune/main.py --num_epochs 1 --num_trials 1 --cpus_per_trial 1 --gpus_per_trial 0

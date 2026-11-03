@@ -1,22 +1,22 @@
-from typing import Callable, Optional, Union
+from typing import Callable
 from unittest.mock import patch
 
 import pytest
 import torch
 import torchvision
 
-from ignite.metrics.gan.utils import InceptionModel, _BaseInceptionMetric
+from ignite.metrics.gan.utils import _BaseInceptionMetric, InceptionModel
 
 
 class DummyInceptionMetric(_BaseInceptionMetric):
     def __init__(
         self,
-        num_features: Optional[int] = None,
-        feature_extractor: Optional[torch.nn.Module] = None,
+        num_features: int | None = None,
+        feature_extractor: torch.nn.Module | None = None,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
     ) -> None:
-        super(DummyInceptionMetric, self).__init__(
+        super().__init__(
             num_features=num_features,
             feature_extractor=feature_extractor,
             output_transform=output_transform,
@@ -34,7 +34,6 @@ class DummyInceptionMetric(_BaseInceptionMetric):
 
 
 def test_dummy_metric():
-
     with pytest.raises(ValueError, match=r"Argument num_features must be greater to zero, got:"):
         DummyInceptionMetric(num_features=-1, feature_extractor=torch.nn.Identity()).update(torch.rand(2, 0))
 
@@ -57,7 +56,6 @@ def test_dummy_metric():
 
 
 def test_inception_extractor_wrong_inputs():
-
     with pytest.raises(ValueError, match=r"Inputs should be a tensor of dim 4"):
         InceptionModel(return_features=True)(torch.rand(2))
 
@@ -80,7 +78,7 @@ def mock_no_torchvision():
 
 
 def test_no_torchvision(mock_no_torchvision):
-    with pytest.raises(RuntimeError, match=r"This module requires torchvision to be installed."):
+    with pytest.raises(ModuleNotFoundError, match=r"This module requires torchvision to be installed."):
         InceptionModel(return_features=True)
 
 

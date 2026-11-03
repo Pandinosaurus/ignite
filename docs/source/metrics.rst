@@ -4,8 +4,19 @@ ignite.metrics
 Metrics provide a way to compute various quantities of interest in an online
 fashion without having to store the entire output history of a model.
 
-In practice a user needs to attach the metric instance to an engine. The metric
-value is then computed using the output of the engine's ``process_function``:
+.. _attach-engine:
+
+Attach Engine API
+------------------
+
+The metrics as stated above are computed in a online fashion, which means that the metric instance accumulates some internal counters on
+each iteration and metric value is computed once the epoch is ended. Internal counters are reset after every epoch. In practice, this is done with the
+help of three methods: :meth:`~ignite.metrics.metric.Metric.reset()`, :meth:`~ignite.metrics.metric.Metric.update()` and :meth:`~ignite.metrics.metric.Metric.compute()`.
+
+Therefore, a user needs to attach the metric instance to the engine so that the above three methods can be triggered on execution of certain :class:`~ignite.engine.events.Events`.
+The :meth:`~ignite.metrics.metric.Metric.reset()` method is triggered on ``EPOCH_STARTED`` event and it is responsible to reset the metric to its initial state. The :meth:`~ignite.metrics.metric.Metric.update()` method is triggered
+on ``ITERATION_COMPLETED`` event as it updates the state of the metric using the passed batch output. And :meth:`~ignite.metrics.metric.Metric.compute()` is triggered on ``EPOCH_COMPLETED``
+event. It computes the metric based on its accumulated states. The metric value is computed using the output of the engine's ``process_function``:
 
 .. code-block:: python
 
@@ -138,10 +149,10 @@ This API gives a more fine-grained/custom usage on how to compute a metric. For 
     print("Precision: ", precision.compute())
 
 
-Metric arithmetics
-------------------
+Metric arithmetic
+-----------------
 
-Metrics could be combined together to form new metrics. This could be done through arithmetics, such
+Metrics could be combined together to form new metrics. This could be done through arithmetic, such
 as ``metric1 + metric2``, use PyTorch operators, such as ``(metric1 + metric2).pow(2).mean()``,
 or use a lambda function, such as ``MetricsLambda(lambda a, b: torch.mean(a + b), metric1, metric2)``.
 
@@ -200,7 +211,7 @@ specific condition (e.g. ignore user-defined classes):
             self.ignored_class = ignored_class
             self._num_correct = None
             self._num_examples = None
-            super(CustomAccuracy, self).__init__(output_transform=output_transform, device=device)
+            super().__init__(output_transform=output_transform, device=device)
 
         @reinit__is_reduced
         def reset(self):
@@ -272,14 +283,17 @@ By default, `Metrics` are epoch-wise, it means
 - :meth:`~ignite.metrics.metric.Metric.update()` is triggered every ``ITERATION_COMPLETED``.
 - :meth:`~ignite.metrics.metric.Metric.compute()` is triggered every ``EPOCH_COMPLETED``.
 
-Usages can be user defined by creating a class inheriting for :class:`~ignite.metrics.metric.MetricUsage`. See the list below of usages.
+Usages can be user defined by creating a class inheriting from :class:`~ignite.metrics.metric.MetricUsage`. See the list below of usages.
 
 Complete list of usages
 ~~~~~~~~~~~~~~~~~~~~~~~
 
     - :class:`~ignite.metrics.metric.MetricUsage`
     - :class:`~ignite.metrics.metric.EpochWise`
+    - :class:`~ignite.metrics.metric.RunningEpochWise`
     - :class:`~ignite.metrics.metric.BatchWise`
+    - :class:`~ignite.metrics.metric.RunningBatchWise`
+    - :class:`~ignite.metrics.metric.SingleEpochRunningBatchWise`
     - :class:`~ignite.metrics.metric.BatchFiltered`
 
 Metrics and distributed computations
@@ -289,7 +303,7 @@ In the above example, ``CustomAccuracy`` has ``reset``, ``update``, ``compute`` 
 with :meth:`~ignite.metrics.metric.reinit__is_reduced`, :meth:`~ignite.metrics.metric.sync_all_reduce`. The purpose of these features is to adapt metrics in distributed
 computations on supported backend and devices (see :doc:`distributed` for more details). More precisely, in the above
 example we added ``@sync_all_reduce("_num_examples", "_num_correct:SUM")`` over ``compute`` method. This means that when ``compute``
-method is called, metric's interal variables ``self._num_examples`` and ``self._num_correct:SUM`` are summed up over all participating
+method is called, metric's internal variables ``self._num_examples`` and ``self._num_correct:SUM`` are summed up over all participating
 devices. We specify the reduction operation ``self._num_correct:SUM`` or we keep the default ``self._num_examples`` as the default is ``SUM``.
 We currently support four reduction operations (SUM, MAX, MIN, PRODUCT).
 Therefore, once collected, these internal variables can be used to compute the final metric value.
@@ -307,7 +321,7 @@ Complete list of metrics
     GeometricAverage
     VariableAccumulation
     Accuracy
-    confusion_matrix.ConfusionMatrix
+    ConfusionMatrix
     ClassificationReport
     DiceCoefficient
     JaccardIndex
@@ -318,24 +332,80 @@ Complete list of metrics
     Frequency
     Loss
     MeanAbsoluteError
+    MeanAveragePrecision
     MeanPairwiseDistance
     MeanSquaredError
-    metric.Metric
-    metrics_lambda.MetricsLambda
+    Metric
+    MetricGroup
+    MetricsLambda
     MultiLabelConfusionMatrix
-    precision.Precision
+    MutualInformation
+    ObjectDetectionAvgPrecisionRecall
+    CommonObjectDetectionMetrics
+    coco_tensor_list_to_dict_list
+    Precision
     PSNR
-    recall.Recall
+    Recall
     RootMeanSquaredError
     RunningAverage
     SSIM
     TopKCategoricalAccuracy
     Bleu
+    Perplexity
     Rouge
     RougeL
     RougeN
+    CharacterErrorRate
     InceptionScore
     FID
+    CosineSimilarity
+    Entropy
+    KLDivergence
+    JSDivergence
+    MatthewsCorrCoef
+    MaximumMeanDiscrepancy
+    HSIC
+    AveragePrecision
+    CohenKappa
+    GpuInfo
+    PrecisionRecallCurve
+    RocCurve
+    ROC_AUC
+    regression.CanberraMetric
+    regression.FractionalAbsoluteError
+    regression.FractionalBias
+    regression.GeometricMeanAbsoluteError
+    regression.GeometricMeanRelativeAbsoluteError
+    regression.ManhattanDistance
+    regression.MaximumAbsoluteError
+    regression.MeanAbsoluteRelativeError
+    regression.MeanError
+    regression.MeanNormalizedBias
+    regression.MedianAbsoluteError
+    regression.MedianAbsolutePercentageError
+    regression.MedianRelativeAbsoluteError
+    regression.PearsonCorrelation
+    regression.SpearmanRankCorrelation
+    regression.KendallRankCorrelation
+    regression.R2Score
+    regression.WaveHedgesDistance
+    clustering.SilhouetteScore
+    clustering.DaviesBouldinScore
+    clustering.CalinskiHarabaszScore
+    fairness.SubgroupAccuracyDifference
+    fairness.DemographicParityDifference
+    fairness.SelectionRate
+    fairness.SubgroupDifference
+    fairness.SubgroupMetric
+    rec_sys.HitRate
+    rec_sys.NDCG
+
+.. note::
+
+    Module ignite.metrics.regression provides implementations of metrics useful
+    for regression tasks. Definitions of metrics are based on
+    `Botchkarev 2018`_, page 30 "Appendix 2. Metrics mathematical definitions".
+
 
 Helpers for customizing metrics
 -------------------------------
@@ -348,9 +418,21 @@ EpochWise
 ~~~~~~~~~
 .. autoclass:: ignite.metrics.metric.EpochWise
 
+RunningEpochWise
+~~~~~~~~~~~~~~~~
+.. autoclass:: ignite.metrics.metric.RunningEpochWise
+
 BatchWise
 ~~~~~~~~~
 .. autoclass:: ignite.metrics.metric.BatchWise
+
+RunningBatchWise
+~~~~~~~~~~~~~~~~
+.. autoclass:: ignite.metrics.metric.RunningBatchWise
+
+SingleEpochRunningBatchWise
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. autoclass:: ignite.metrics.metric.SingleEpochRunningBatchWise
 
 BatchFiltered
 ~~~~~~~~~~~~~
@@ -365,3 +447,6 @@ reinit__is_reduced
 sync_all_reduce
 ~~~~~~~~~~~~~~~
 .. autofunction:: sync_all_reduce
+
+.. _`Botchkarev 2018`:
+        https://arxiv.org/abs/1809.03006

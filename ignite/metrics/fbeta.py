@@ -1,4 +1,5 @@
-from typing import Callable, Optional, Union
+from collections.abc import Callable
+from typing import cast
 
 import torch
 
@@ -12,10 +13,11 @@ __all__ = ["Fbeta"]
 def Fbeta(
     beta: float,
     average: bool = True,
-    precision: Optional[Precision] = None,
-    recall: Optional[Recall] = None,
-    output_transform: Optional[Callable] = None,
-    device: Union[str, torch.device] = torch.device("cpu"),
+    precision: Precision | None = None,
+    recall: Recall | None = None,
+    output_transform: Callable | None = None,
+    device: str | torch.device | None = None,
+    class_names: list[str] | None = None,
 ) -> MetricsLambda:
     r"""Calculates F-beta score.
 
@@ -25,7 +27,7 @@ def Fbeta(
 
     where :math:`\beta` is a positive real factor.
 
-    - ``update`` must receive output of the form ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y}``.
+    - ``update`` must receive output of the form ``(y_pred, y)``.
     - `y_pred` must be in the following shape (batch_size, num_categories, ...) or (batch_size, ...).
     - `y` must be in the following shape (batch_size, ...).
 
@@ -41,11 +43,17 @@ def Fbeta(
         device: specifies which device updates are accumulated on. Setting the metric's
             device to be the same as your ``update`` arguments ensures the ``update`` method is non-blocking. By
             default, CPU.
+        class_names: list of class name strings used to label per-class output. Default: ``None``.
 
     Returns:
         MetricsLambda, F-beta metric
 
     Examples:
+
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
 
         Binary case
 
@@ -55,8 +63,8 @@ def Fbeta(
             R = Recall(average=False)
             metric = Fbeta(beta=1.0, precision=P, recall=R)
             metric.attach(default_evaluator, "f-beta")
-            y_true = torch.Tensor([1, 0, 1, 1, 0, 1])
-            y_pred = torch.Tensor([1, 0, 1, 0, 1, 1])
+            y_true = torch.tensor([1, 0, 1, 1, 0, 1])
+            y_pred = torch.tensor([1, 0, 1, 0, 1, 1])
             state = default_evaluator.run([[y_pred, y_true]])
             print(state.metrics["f-beta"])
 
@@ -72,8 +80,8 @@ def Fbeta(
             R = Recall(average=False)
             metric = Fbeta(beta=1.0, precision=P, recall=R)
             metric.attach(default_evaluator, "f-beta")
-            y_true = torch.Tensor([2, 0, 2, 1, 0, 1]).long()
-            y_pred = torch.Tensor([
+            y_true = torch.tensor([2, 0, 2, 1, 0, 1])
+            y_pred = torch.tensor([
                 [0.0266, 0.1719, 0.3055],
                 [0.6886, 0.3978, 0.8176],
                 [0.9230, 0.0197, 0.8395],
@@ -96,8 +104,8 @@ def Fbeta(
             R = Recall(average=False)
             metric = Fbeta(beta=1.0, average=False, precision=P, recall=R)
             metric.attach(default_evaluator, "f-beta")
-            y_true = torch.Tensor([2, 0, 2, 1, 0, 1]).long()
-            y_pred = torch.Tensor([
+            y_true = torch.tensor([2, 0, 2, 1, 0, 1])
+            y_pred = torch.tensor([
                 [0.0266, 0.1719, 0.3055],
                 [0.6886, 0.3978, 0.8176],
                 [0.9230, 0.0197, 0.8395],
@@ -126,43 +134,93 @@ def Fbeta(
             R = Recall(average=False, output_transform=thresholded_output_transform)
             metric = Fbeta(beta=1.0, precision=P, recall=R)
             metric.attach(default_evaluator, "f-beta")
-            y_true = torch.Tensor([1, 0, 1, 1, 0, 1])
-            y_pred = torch.Tensor([0.6, 0.2, 0.9, 0.4, 0.7, 0.65])
+            y_true = torch.tensor([1, 0, 1, 1, 0, 1])
+            y_pred = torch.tensor([0.6, 0.2, 0.9, 0.4, 0.7, 0.65])
             state = default_evaluator.run([[y_pred, y_true]])
             print(state.metrics["f-beta"])
 
         .. testoutput:: 4
 
             0.7499...
+
+    .. versionchanged:: 0.6.0
+        ``class_names`` argument is added.
     """
     if not (beta > 0):
         raise ValueError(f"Beta should be a positive integer, but given {beta}")
 
-    if precision is not None and output_transform is not None:
-        raise ValueError("If precision argument is provided, output_transform should be None")
+    if precision is not None:
+        if output_transform is not None:
+            raise ValueError("If precision argument is provided, output_transform should be None")
+        if device is not None:
+            raise ValueError("If precision argument is provided, device should be None")
 
-    if recall is not None and output_transform is not None:
-        raise ValueError("If recall argument is provided, output_transform should be None")
+    if recall is not None:
+        if output_transform is not None:
+            raise ValueError("If recall argument is provided, output_transform should be None")
+        if device is not None:
+            raise ValueError("If recall argument is provided, device should be None")
+
+    if precision is None and recall is None and device is None:
+        device = torch.device("cpu")
+
+    if class_names is not None:
+        if not isinstance(class_names, (list, tuple)) or not all(isinstance(n, str) for n in class_names):
+            raise ValueError("class_names must be a list of strings")
+        if average not in (False, None):
+            raise ValueError(
+                f"class_names is only applicable when average=False or average=None, got average={average!r}."
+            )
+
+    if precision is not None and precision._average:
+        raise ValueError("Input precision metric should have average=False")
+
+    if recall is not None and recall._average:
+        raise ValueError("Input recall metric should have average=False")
+
+    active_metrics = [m for m in (precision, recall) if m is not None]
+
+    if class_names is not None and any(m._class_names != class_names for m in active_metrics):
+        raise ValueError("precision and recall metric class_names must match Fbeta class_names")
+
+    if len(active_metrics) == 2 and active_metrics[0]._class_names != active_metrics[1]._class_names:
+        raise ValueError("precision and recall class_names must match")
+
+    if class_names is None and precision is not None:
+        class_names = precision._class_names
+    if class_names is None and recall is not None:
+        class_names = recall._class_names
 
     if precision is None:
         precision = Precision(
-            output_transform=(lambda x: x) if output_transform is None else output_transform,  # type: ignore[arg-type]
+            output_transform=(lambda x: x) if output_transform is None else output_transform,
             average=False,
-            device=device,
+            device=cast(str | torch.device, recall._device if recall else device),
+            class_names=class_names,
         )
-    elif precision._average:
-        raise ValueError("Input precision metric should have average=False")
 
     if recall is None:
         recall = Recall(
-            output_transform=(lambda x: x) if output_transform is None else output_transform,  # type: ignore[arg-type]
+            output_transform=(lambda x: x) if output_transform is None else output_transform,
             average=False,
-            device=device,
+            device=cast(str | torch.device, precision._device if precision else device),
+            class_names=class_names,
         )
-    elif recall._average:
-        raise ValueError("Input recall metric should have average=False")
 
-    fbeta = (1.0 + beta ** 2) * precision * recall / (beta ** 2 * precision + recall + 1e-15)
+    if class_names is not None:
+
+        def _fbeta_with_class_names(p: dict, r: dict) -> dict:
+            p_vals = torch.tensor(list(p.values()))
+            r_vals = torch.tensor(list(r.values()))
+            scores = (1.0 + beta**2) * p_vals * r_vals / (beta**2 * p_vals + r_vals + 1e-15)
+            values = scores.tolist()
+            if not isinstance(values, list):
+                values = [values]
+            return dict(zip(class_names, values))
+
+        return MetricsLambda(_fbeta_with_class_names, precision, recall)
+
+    fbeta = (1.0 + beta**2) * precision * recall / (beta**2 * precision + recall + 1e-15)
 
     if average:
         fbeta = fbeta.mean().item()

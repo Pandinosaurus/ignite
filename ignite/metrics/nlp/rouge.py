@@ -1,23 +1,26 @@
 from abc import ABCMeta, abstractmethod
-from collections import namedtuple
-from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple, Union
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, NamedTuple
 
 import torch
 
 from ignite.exceptions import NotComputableError
-from ignite.metrics import Metric
 
 # These decorators helps with distributed settings
-from ignite.metrics.metric import reinit__is_reduced, sync_all_reduce
+from ignite.metrics.metric import Metric, reinit__is_reduced, sync_all_reduce
 from ignite.metrics.nlp.utils import lcs, ngrams
 
 __all__ = ["Rouge", "RougeN", "RougeL"]
 
 
-class Score(namedtuple("Score", ["match", "candidate", "reference"])):
+class Score(NamedTuple):
     r"""
     Computes precision and recall for given matches, candidate and reference lengths.
     """
+
+    match: int
+    candidate: int
+    reference: int
 
     def precision(self) -> float:
         """
@@ -34,7 +37,7 @@ class Score(namedtuple("Score", ["match", "candidate", "reference"])):
 
 def compute_ngram_scores(candidate: Sequence[Any], reference: Sequence[Any], n: int = 4) -> Score:
     """
-    Compute the score based on ngram co-occurence of sequences of items
+    Compute the score based on ngram co-occurrence of sequences of items
 
     Args:
         candidate: candidate sequence of items
@@ -42,7 +45,7 @@ def compute_ngram_scores(candidate: Sequence[Any], reference: Sequence[Any], n: 
         n: ngram order
 
     Returns:
-        The score containing the number of ngram co-occurences
+        The score containing the number of ngram co-occurrences
 
     .. versionadded:: 0.4.5
     """
@@ -51,7 +54,7 @@ def compute_ngram_scores(candidate: Sequence[Any], reference: Sequence[Any], n: 
     candidate_counter = ngrams(candidate, n)
     # ngrams of the references
     reference_counter = ngrams(reference, n)
-    # ngram co-occurences in the candidate and the references
+    # ngram co-occurrences in the candidate and the references
     match_counters = candidate_counter & reference_counter
 
     # the score is defined using Fraction
@@ -119,14 +122,16 @@ class _BaseRouge(Metric):
     Rouge interface for Rouge-L and Rouge-N
     """
 
+    _state_dict_all_req_keys = ("_recall", "_precision", "_fmeasure", "_num_examples")
+
     def __init__(
         self,
         multiref: str = "average",
         alpha: float = 0,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
     ) -> None:
-        super(_BaseRouge, self).__init__(output_transform=output_transform, device=device)
+        super().__init__(output_transform=output_transform, device=device)
         self._alpha = alpha
         if not 0 <= self._alpha <= 1:
             raise ValueError(f"alpha must be in interval [0, 1] (got : {self._alpha})")
@@ -134,7 +139,7 @@ class _BaseRouge(Metric):
         valid_multiref = ["best", "average"]
         if self._multiref not in valid_multiref:
             raise ValueError(f"multiref : valid values are {valid_multiref} (got : {self._multiref})")
-        self._mutliref_reducer = self._get_multiref_reducer()
+        self._multiref_reducer = self._get_multiref_reducer()
 
     def _get_multiref_reducer(self) -> MultiRefReducer:
         if self._multiref == "average":
@@ -149,11 +154,15 @@ class _BaseRouge(Metric):
         self._num_examples = 0
 
     @reinit__is_reduced
-    def update(self, output: Tuple[Sequence[Sequence[Any]], Sequence[Sequence[Sequence[Any]]]]) -> None:
+    def update(self, output: tuple[Sequence[Sequence[Any]], Sequence[Sequence[Sequence[Any]]]]) -> None:
         candidates, references = output
+        if len(references) != len(candidates):
+            raise ValueError(
+                f"nb of candidates should be equal to nb of reference lists ({len(candidates)} != {len(references)})"
+            )
         for _candidate, _reference in zip(candidates, references):
-            multiref_scores = [self._compute_score(candidate=_candidate, reference=_ref,) for _ref in _reference]
-            score = self._mutliref_reducer(multiref_scores)
+            multiref_scores = [self._compute_score(candidate=_candidate, reference=_ref) for _ref in _reference]
+            score = self._multiref_reducer(multiref_scores)
             precision = score.precision()
             recall = score.recall()
             self._precision += precision
@@ -166,7 +175,7 @@ class _BaseRouge(Metric):
     @sync_all_reduce("_precision", "_recall", "_fmeasure", "_num_examples")
     def compute(self) -> Mapping:
         if self._num_examples == 0:
-            raise NotComputableError("Rouge metric must have at least one example before be computed")
+            raise NotComputableError("Rouge metric must have at least one example before being computed")
 
         return {
             f"{self._metric_name()}-P": float(self._precision / self._num_examples),
@@ -186,11 +195,11 @@ class _BaseRouge(Metric):
 class RougeN(_BaseRouge):
     r"""Calculates the Rouge-N score.
 
-    The Rouge-N is based on the ngram co-occurences of candidates and references.
+    The Rouge-N is based on the ngram co-occurrences of candidates and references.
 
     More details can be found in `Lin 2004`__.
 
-    __ https://www.aclweb.org/anthology/W04-1013.pdf
+    __ https://aclanthology.org/W04-1013
 
     - ``update`` must receive output of the form ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y}``.
     - `y_pred` (list(list(str))) must be a sequence of tokens.
@@ -211,6 +220,8 @@ class RougeN(_BaseRouge):
             default, CPU.
 
     Examples:
+
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
 
         .. testcode::
 
@@ -241,9 +252,9 @@ class RougeN(_BaseRouge):
         multiref: str = "average",
         alpha: float = 0,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
     ):
-        super(RougeN, self).__init__(multiref=multiref, alpha=alpha, output_transform=output_transform, device=device)
+        super().__init__(multiref=multiref, alpha=alpha, output_transform=output_transform, device=device)
         self._ngram = ngram
         if self._ngram < 1:
             raise ValueError(f"ngram order must be greater than zero (got : {self._ngram})")
@@ -262,7 +273,7 @@ class RougeL(_BaseRouge):
 
     More details can be found in `Lin 2004`__.
 
-    __ https://www.aclweb.org/anthology/W04-1013.pdf
+    __ https://aclanthology.org/W04-1013
 
     - ``update`` must receive output of the form ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y}``.
     - `y_pred` (list(list(str))) must be a sequence of tokens.
@@ -281,6 +292,8 @@ class RougeL(_BaseRouge):
             default, CPU.
 
     Examples:
+
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
 
         .. testcode::
 
@@ -310,9 +323,9 @@ class RougeL(_BaseRouge):
         multiref: str = "average",
         alpha: float = 0,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
     ):
-        super(RougeL, self).__init__(multiref=multiref, alpha=alpha, output_transform=output_transform, device=device)
+        super().__init__(multiref=multiref, alpha=alpha, output_transform=output_transform, device=device)
 
     def _compute_score(self, candidate: Sequence[Any], reference: Sequence[Any]) -> Score:
         return compute_lcs_scores(candidate=candidate, reference=reference)
@@ -326,7 +339,7 @@ class Rouge(Metric):
 
     More details can be found in `Lin 2004`__.
 
-    __ https://www.aclweb.org/anthology/W04-1013.pdf
+    __ https://aclanthology.org/W04-1013
 
     - ``update`` must receive output of the form ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y}``.
     - `y_pred` (list(list(str))) must be a sequence of tokens.
@@ -346,6 +359,8 @@ class Rouge(Metric):
             default, CPU.
 
     Examples:
+
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
 
         .. testcode::
 
@@ -368,23 +383,25 @@ class Rouge(Metric):
             {'Rouge-L-P': 0.6, 'Rouge-L-R': 0.5, 'Rouge-L-F': 0.5, 'Rouge-2-P': 0.5, 'Rouge-2-R': 0.4, 'Rouge-2-F': 0.4}
 
     .. versionadded:: 0.4.5
-    .. versionchanged:: 0.5.0
-        Changed input type to work on batch of inputs
+    .. versionchanged:: 0.4.7
+        ``update`` method has changed and now works on batch of inputs.
     """
+
+    _state_dict_all_req_keys = ("internal_metrics",)
 
     def __init__(
         self,
-        variants: Optional[Sequence[Union[str, int]]] = None,
+        variants: Sequence[str | int] | None = None,
         multiref: str = "average",
         alpha: float = 0,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
     ):
         if variants is None or len(variants) == 0:
             variants = [1, 2, 4, "L"]
-        self.internal_metrics: List[_BaseRouge] = []
+        self.internal_metrics: list[_BaseRouge] = []
         for m in variants:
-            variant: Optional[_BaseRouge] = None
+            variant: _BaseRouge | None = None
             if isinstance(m, str) and m == "L":
                 variant = RougeL(multiref=multiref, alpha=alpha, output_transform=output_transform, device=device)
             elif isinstance(m, int):
@@ -394,7 +411,7 @@ class Rouge(Metric):
             else:
                 raise ValueError("variant must be 'L' or integer greater to zero")
             self.internal_metrics.append(variant)
-        super(Rouge, self).__init__(output_transform=output_transform, device=device)
+        super().__init__(output_transform=output_transform, device=device)
 
     @reinit__is_reduced
     def reset(self) -> None:
@@ -402,7 +419,7 @@ class Rouge(Metric):
             m.reset()
 
     @reinit__is_reduced
-    def update(self, output: Tuple[Sequence[Sequence[Any]], Sequence[Sequence[Sequence[Any]]]]) -> None:
+    def update(self, output: tuple[Sequence[Sequence[Any]], Sequence[Sequence[Sequence[Any]]]]) -> None:
         for m in self.internal_metrics:
             m.update(output)
 

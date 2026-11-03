@@ -11,7 +11,8 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data.sampler import BatchSampler, RandomSampler, Sampler, SequentialSampler, WeightedRandomSampler
 
 import ignite.distributed as idist
-from ignite.distributed.auto import DistributedProxySampler, auto_dataloader, auto_model, auto_optim
+from ignite.distributed.auto import auto_dataloader, auto_model, auto_optim, DistributedProxySampler
+from tests.ignite import is_mps_available_and_functional
 
 
 class DummyDS(Dataset):
@@ -27,7 +28,7 @@ class DummyDS(Dataset):
 
 class DummyIterableDataset(IterableDataset):
     def __init__(self, start, end):
-        super(DummyIterableDataset).__init__()
+        super().__init__()
         self.start = start
         self.end = end
 
@@ -144,9 +145,9 @@ def _test_auto_model(model, ws, device, sync_bn=False, **kwargs):
     else:
         assert isinstance(model, nn.Module)
 
-    assert all(
-        [p.device.type == torch.device(device).type for p in model.parameters()]
-    ), f"{[p.device.type for p in model.parameters()]} vs {torch.device(device).type}"
+    assert all([p.device.type == torch.device(device).type for p in model.parameters()]), (
+        f"{[p.device.type for p in model.parameters()]} vs {torch.device(device).type}"
+    )
 
 
 def _test_auto_model_optimizer(ws, device):
@@ -179,20 +180,19 @@ def _test_auto_model_optimizer(ws, device):
         assert optimizer.backward_passes_per_step == backward_passes_per_step
 
 
+@pytest.mark.skipif(not is_mps_available_and_functional(), reason="Skip if MPS not functional")
 def test_auto_methods_no_dist():
-
     _test_auto_dataloader(1, 1, batch_size=1)
     _test_auto_dataloader(1, 1, batch_size=10, num_workers=2)
     _test_auto_dataloader(1, 1, batch_size=10, sampler_name="WeightedRandomSampler")
     _test_auto_dataloader(1, 1, batch_size=10, sampler_name="DistributedSampler")
-
-    _test_auto_model_optimizer(1, "cuda" if torch.cuda.is_available() else "cpu")
+    device = idist.device()
+    _test_auto_model_optimizer(1, device)
 
 
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 def test_auto_methods_gloo(distributed_context_single_node_gloo):
-
     ws = distributed_context_single_node_gloo["world_size"]
     _test_auto_dataloader(ws=ws, nproc=ws, batch_size=1)
     _test_auto_dataloader(ws=ws, nproc=ws, batch_size=10, num_workers=2)
@@ -206,7 +206,9 @@ def test_auto_methods_gloo(distributed_context_single_node_gloo):
         # Pytorch <= 1.9.0 => AssertionError
         # Pytorch >  1.9   => ValueError
         # https://github.com/pytorch/pytorch/blob/master/torch/nn/parallel/distributed.py#L1498
-        with pytest.raises((AssertionError, ValueError), match=r"SyncBatchNorm layers only work with GPU modules"):
+        with pytest.raises(
+            (AssertionError, ValueError), match=r"SyncBatchNorm layers only work with (GPU|CUDA) modules"
+        ):
             model = nn.Sequential(nn.Linear(20, 100), nn.BatchNorm1d(100))
             auto_model(model, sync_bn=True)
 
@@ -215,7 +217,6 @@ def test_auto_methods_gloo(distributed_context_single_node_gloo):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
 def test_auto_methods_nccl(distributed_context_single_node_nccl):
-
     ws = distributed_context_single_node_nccl["world_size"]
     _test_auto_dataloader(ws=ws, nproc=ws, batch_size=1)
     _test_auto_dataloader(ws=ws, nproc=ws, batch_size=10, num_workers=10)
@@ -234,7 +235,6 @@ def test_auto_methods_nccl(distributed_context_single_node_nccl):
 @pytest.mark.skipif(not idist.has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_auto_methods_hvd(gloo_hvd_executor):
-
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     np = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
 
@@ -247,10 +247,8 @@ def test_auto_methods_hvd(gloo_hvd_executor):
 
 
 def _test_auto_methods_xla(index, ws):
-
     dl_type = DataLoader
     if ws > 1:
-
         from ignite.distributed.auto import _MpDeviceLoader
 
         dl_type = _MpDeviceLoader
@@ -286,7 +284,6 @@ def test_auto_methods_xla():
 
 
 def test_dist_proxy_sampler():
-
     weights = torch.ones(100)
     weights[:50] += 1
     num_samples = 200
@@ -306,15 +303,15 @@ def test_dist_proxy_sampler():
 
         set_indices_per_rank = set(indices_per_rank)
         set_true_indices = set(true_indices)
-        assert (
-            set_indices_per_rank == set_true_indices
-        ), f"{set_true_indices - set_indices_per_rank} | {set_indices_per_rank - set_true_indices}"
+        assert set_indices_per_rank == set_true_indices, (
+            f"{set_true_indices - set_indices_per_rank} | {set_indices_per_rank - set_true_indices}"
+        )
 
     with pytest.raises(TypeError, match=r"Argument sampler should be instance of torch Sampler"):
         DistributedProxySampler(None)
 
     with pytest.raises(TypeError, match=r"Argument sampler should have length"):
-        DistributedProxySampler(Sampler([1]))
+        DistributedProxySampler(Sampler())
 
     with pytest.raises(TypeError, match=r"Argument sampler must not be a distributed sampler already"):
         DistributedProxySampler(DistributedSampler(sampler, num_replicas=num_replicas, rank=0))

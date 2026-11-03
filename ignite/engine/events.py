@@ -1,8 +1,10 @@
 import numbers
+import warnings
 import weakref
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from enum import Enum
 from types import DynamicClassAttribute
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Union
+from typing import Any, TYPE_CHECKING
 
 from torch.utils.data import DataLoader
 
@@ -21,14 +23,12 @@ class CallableEventWithFilter:
     Args:
         value: The actual enum value. Only needed for internal use. Do not touch!
         event_filter: A function taking the engine and the current event value as input and returning a
-            boolean to indicate whether this event should be executed. Defaults to None, which will result to a
+            boolean to indicate whether this event should be executed. Defaults to None, which will result in a
             function that always returns `True`
         name: The enum-name of the current object. Only needed for internal use. Do not touch!
     """
 
-    def __init__(self, value: str, event_filter: Optional[Callable] = None, name: Optional[str] = None) -> None:
-        if event_filter is None:
-            event_filter = CallableEventWithFilter.default_event_filter
+    def __init__(self, value: str, event_filter: Callable | None = None, name: str | None = None) -> None:
         self.filter = event_filter
 
         if not hasattr(self, "_value_"):
@@ -49,7 +49,12 @@ class CallableEventWithFilter:
         return self._value_
 
     def __call__(
-        self, event_filter: Optional[Callable] = None, every: Optional[int] = None, once: Optional[int] = None
+        self,
+        event_filter: Callable | None = None,
+        every: int | None = None,
+        once: int | list | None = None,
+        before: int | None = None,
+        after: int | None = None,
     ) -> "CallableEventWithFilter":
         """
         Makes the event class callable and accepts either an arbitrary callable as filter
@@ -59,14 +64,25 @@ class CallableEventWithFilter:
             event_filter: a filter function to check if the event should be executed when
                 the event type was fired
             every: a value specifying how often the event should be fired
-            once: a value specifying when the event should be fired (if only once)
+            once: a value or list of values specifying when the event should be fired (if only once)
+            before: a value specifying the number of occurrence that event should be fired before
+            after: a value specifying the number of occurrence that event should be fired after
 
         Returns:
             CallableEventWithFilter: A new event having the same value but a different filter function
         """
 
-        if not ((event_filter is not None) ^ (every is not None) ^ (once is not None)):
-            raise ValueError("Only one of the input arguments should be specified")
+        if (
+            sum(
+                (
+                    event_filter is not None,
+                    once is not None,
+                    (every is not None or before is not None or after is not None),
+                )
+            )
+            != 1
+        ):
+            raise ValueError("Only one of the input arguments should be specified, except before, after and every")
 
         if (event_filter is not None) and not callable(event_filter):
             raise TypeError("Argument event_filter should be a callable")
@@ -74,8 +90,19 @@ class CallableEventWithFilter:
         if (every is not None) and not (isinstance(every, numbers.Integral) and every > 0):
             raise ValueError("Argument every should be integer and greater than zero")
 
-        if (once is not None) and not (isinstance(once, numbers.Integral) and once > 0):
-            raise ValueError("Argument once should be integer and positive")
+        if once is not None:
+            c1 = isinstance(once, int) and once > 0
+            c2 = isinstance(once, Sequence) and len(once) > 0 and all(isinstance(e, int) and e > 0 for e in once)
+            if not (c1 or c2):
+                raise ValueError(
+                    f"Argument once should either be a positive integer or a list of positive integers, got {once}"
+                )
+
+        if (before is not None) and not (isinstance(before, numbers.Integral) and before >= 0):
+            raise ValueError("Argument before should be integer and greater or equal to zero")
+
+        if (after is not None) and not (isinstance(after, numbers.Integral) and after >= 0):
+            raise ValueError("Argument after should be integer and greater or equal to zero")
 
         if every is not None:
             if every == 1:
@@ -85,7 +112,13 @@ class CallableEventWithFilter:
                 event_filter = self.every_event_filter(every)
 
         if once is not None:
-            event_filter = self.once_event_filter(once)
+            event_filter = self.once_event_filter([once] if isinstance(once, int) else once)
+
+        if before is not None or after is not None:
+            if every is not None:
+                event_filter = self.every_before_and_after_event_filter(every, before, after)
+            else:
+                event_filter = self.before_and_after_event_filter(before, after)
 
         # check signature:
         if event_filter is not None:
@@ -105,11 +138,39 @@ class CallableEventWithFilter:
         return wrapper
 
     @staticmethod
-    def once_event_filter(once: int) -> Callable:
+    def once_event_filter(once: list) -> Callable:
         """A wrapper for once event filter."""
 
         def wrapper(engine: "Engine", event: int) -> bool:
-            if event == once:
+            if event in once:
+                return True
+            return False
+
+        return wrapper
+
+    @staticmethod
+    def before_and_after_event_filter(before: int | None = None, after: int | None = None) -> Callable:
+        """A wrapper for before and after event filter."""
+        before_: int | float = float("inf") if before is None else before
+        after_: int = 0 if after is None else after
+
+        def wrapper(engine: "Engine", event: int) -> bool:
+            if event > after_ and event < before_:
+                return True
+            return False
+
+        return wrapper
+
+    @staticmethod
+    def every_before_and_after_event_filter(
+        every: int, before: int | None = None, after: int | None = None
+    ) -> Callable:
+        """A wrapper which triggers for every `every` iterations after `after` and before `before`."""
+        before_: int | float = float("inf") if before is None else before
+        after_: int = 0 if after is None else after
+
+        def wrapper(engine: "Engine", event: int) -> bool:
+            if after_ < event < before_ and (event - after_ - 1) % every == 0:
                 return True
             return False
 
@@ -117,11 +178,15 @@ class CallableEventWithFilter:
 
     @staticmethod
     def default_event_filter(engine: "Engine", event: int) -> bool:
-        """Default event filter."""
+        """Default event filter. This method is deprecated and will be removed. Please, use None instead"""
+        warnings.warn("Events.default_event_filter is deprecated and will be removed. Please, use None instead")
         return True
 
-    def __str__(self) -> str:
-        return "<event=%s, filter=%r>" % (self.name, self.filter)
+    def __repr__(self) -> str:
+        out = f"Events.{self.name}"
+        if self.filter is not None:
+            out += f"(filter={self.filter})"
+        return out
 
     def __eq__(self, other: Any) -> bool:
         if isinstance(other, CallableEventWithFilter):
@@ -138,7 +203,7 @@ class CallableEventWithFilter:
         return EventsList() | self | other
 
 
-class EventEnum(CallableEventWithFilter, Enum):  # type: ignore[misc]
+class EventEnum(CallableEventWithFilter, Enum):
     """Base class for all :class:`~ignite.engine.events.Events`. User defined custom events should also inherit
     this class.
 
@@ -172,7 +237,11 @@ class EventEnum(CallableEventWithFilter, Enum):  # type: ignore[misc]
                 # ...
     """
 
-    pass
+    def __new__(cls, value: str) -> "EventEnum":
+        obj = CallableEventWithFilter.__new__(cls)
+        obj._value_ = value
+        # pyrefly: ignore [bad-return]
+        return obj
 
 
 class Events(EventEnum):
@@ -191,36 +260,53 @@ class Events(EventEnum):
     - TERMINATE_SINGLE_EPOCH : triggered when the run is about to end the current epoch,
       after receiving a :meth:`~ignite.engine.engine.Engine.terminate_epoch()` or
       :meth:`~ignite.engine.engine.Engine.terminate()` call.
+    - EPOCH_COMPLETED : triggered when the epoch is ended. This is triggered even
+      when :meth:`~ignite.engine.engine.Engine.terminate_epoch()` is called,
+      unless the flag `skip_epoch_completed` is set to True.
 
     - TERMINATE : triggered when the run is about to end completely,
       after receiving :meth:`~ignite.engine.engine.Engine.terminate()` call.
 
-    - EPOCH_COMPLETED : triggered when the epoch is ended. Note that this is triggered even
-      when :meth:`~ignite.engine.engine.Engine.terminate_epoch()` is called.
-    - COMPLETED : triggered when engine's run is completed
+    - COMPLETED : triggered when engine's run is completed or terminated with
+      :meth:`~ignite.engine.engine.Engine.terminate()`, unless the flag
+      `skip_completed` is set to True.
 
     The table below illustrates which events are triggered when various termination methods are called.
 
     .. list-table::
-       :widths: 24 25 33 18
+       :widths: 38 38 28 20 20
        :header-rows: 1
 
        * - Method
-         - EVENT_COMPLETED
          - TERMINATE_SINGLE_EPOCH
+         - EPOCH_COMPLETED
          - TERMINATE
+         - COMPLETED
        * - no termination
+         - ✗
          - ✔
          - ✗
-         - ✗
+         - ✔
        * - :meth:`~ignite.engine.engine.Engine.terminate_epoch()`
          - ✔
          - ✔
          - ✗
+         - ✔
+       * - :meth:`~ignite.engine.engine.Engine.terminate_epoch()` with `skip_epoch_completed=True`
+         - ✔
+         - ✗
+         - ✗
+         - ✔
        * - :meth:`~ignite.engine.engine.Engine.terminate()`
          - ✗
          - ✔
          - ✔
+         - ✔
+       * - :meth:`~ignite.engine.engine.Engine.terminate()` with `skip_completed=True`
+         - ✗
+         - ✔
+         - ✔
+         - ✗
 
     Since v0.3.0, Events become more flexible and allow to pass an event filter to the Engine:
 
@@ -248,10 +334,20 @@ class Events(EventEnum):
         def call_once(engine):
             # do something on 50th iteration
 
+        # d) "before" and "after" event filter
+        @engine.on(Events.EPOCH_STARTED(before=30, after=10))
+        def call_before(engine):
+            # do something in 11 to 29 epoch
+
+        # e) Mixing "every" and "before" / "after" event filters
+        @engine.on(Events.EPOCH_STARTED(every=5, before=25, after=8))
+        def call_every_itr_before_after(engine):
+            # do something on 9, 14, 19, 24 epochs
+
     Event filter function `event_filter` accepts as input `engine` and `event` and should return True/False.
     Argument `event` is the value of iteration or epoch, depending on which type of Events the function is passed.
 
-    Since v0.4.0, user can also combine events with `|`-operator:
+    Since v0.4.0, users can also combine events with `|`-operator:
 
     .. code-block:: python
 
@@ -277,9 +373,9 @@ class Events(EventEnum):
     """Event attribute indicating epoch is ended."""
 
     STARTED = "started"
-    """triggered when engine’s run is started."""
+    """triggered when engine's run is started."""
     COMPLETED = "completed"
-    """"triggered when engine’s run is completed"""
+    """triggered when engine's run is completed, or after receiving terminate() call."""
 
     ITERATION_STARTED = "iteration_started"
     """triggered when an iteration is started."""
@@ -294,12 +390,14 @@ class Events(EventEnum):
     """triggered after the batch is fetched."""
 
     DATALOADER_STOP_ITERATION = "dataloader_stop_iteration"
-    """"engine’s specific event triggered when dataloader has no more data to provide"""
+    """engine's specific event triggered when dataloader has no more data to provide"""
     TERMINATE = "terminate"
     """triggered when the run is about to end completely, after receiving terminate() call."""
     TERMINATE_SINGLE_EPOCH = "terminate_single_epoch"
     """triggered when the run is about to end the current epoch,
-    after receiving a terminate_epoch() or terminate() call."""
+    after receiving a terminate_epoch() call."""
+    INTERRUPT = "interrupt"
+    """triggered when the run is interrupted, after receiving interrupt() call."""
 
     def __or__(self, other: Any) -> "EventsList":
         return EventsList() | self | other
@@ -330,23 +428,23 @@ class EventsList:
     """
 
     def __init__(self) -> None:
-        self._events = []  # type: List[Union[Events, CallableEventWithFilter]]
+        self._events: list[Events | CallableEventWithFilter] = []
 
-    def _append(self, event: Union[Events, CallableEventWithFilter]) -> None:
+    def _append(self, event: Events | CallableEventWithFilter) -> None:
         if not isinstance(event, (Events, CallableEventWithFilter)):
             raise TypeError(f"Argument event should be Events or CallableEventWithFilter, got: {type(event)}")
         self._events.append(event)
 
-    def __getitem__(self, item: int) -> Union[Events, CallableEventWithFilter]:
+    def __getitem__(self, item: int) -> Events | CallableEventWithFilter:
         return self._events[item]
 
-    def __iter__(self) -> Iterator[Union[Events, CallableEventWithFilter]]:
+    def __iter__(self) -> Iterator[Events | CallableEventWithFilter]:
         return iter(self._events)
 
     def __len__(self) -> int:
         return len(self._events)
 
-    def __or__(self, other: Union[Events, CallableEventWithFilter]) -> "EventsList":
+    def __or__(self, other: Events | CallableEventWithFilter) -> "EventsList":
         self._append(event=other)
         return self
 
@@ -374,7 +472,7 @@ class State:
         kwargs: keyword arguments to be defined as State attributes.
     """
 
-    event_to_attr = {
+    event_to_attr: dict[str | Events | CallableEventWithFilter, str] = {
         Events.GET_BATCH_STARTED: "iteration",
         Events.GET_BATCH_COMPLETED: "iteration",
         Events.ITERATION_STARTED: "iteration",
@@ -383,23 +481,23 @@ class State:
         Events.EPOCH_COMPLETED: "epoch",
         Events.STARTED: "epoch",
         Events.COMPLETED: "epoch",
-    }  # type: Dict[Union[str, "Events", "CallableEventWithFilter"], str]
+    }
 
     def __init__(self, **kwargs: Any) -> None:
         self.iteration = 0
         self.epoch = 0
-        self.epoch_length = None  # type: Optional[int]
-        self.max_epochs = None  # type: Optional[int]
-        self.max_iters = None  # type: Optional[int]
-        self.output = None  # type: Optional[int]
-        self.batch = None  # type: Optional[int]
-        self.metrics = {}  # type: Dict[str, Any]
-        self.dataloader = None  # type: Optional[Union[DataLoader, Iterable[Any]]]
-        self.seed = None  # type: Optional[int]
-        self.times = {
+        self.epoch_length: int | None = None
+        self.max_epochs: int | None = None
+        self.max_iters: int | None = None
+        self.output: int | None = None
+        self.batch: int | None = None
+        self.metrics: dict[str, Any] = {}
+        self.dataloader: DataLoader | Iterable[Any] | None = None
+        self.seed: int | None = None
+        self.times: dict[str, float | None] = {
             Events.EPOCH_COMPLETED.name: None,
             Events.COMPLETED.name: None,
-        }  # type: Dict[str, Optional[float]]
+        }
 
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -411,7 +509,7 @@ class State:
             if not hasattr(self, value):
                 setattr(self, value, 0)
 
-    def get_event_attrib_value(self, event_name: Union[str, Events, CallableEventWithFilter]) -> int:
+    def get_event_attrib_value(self, event_name: str | Events | CallableEventWithFilter) -> int:
         """Get the value of Event attribute with given `event_name`."""
         if event_name not in State.event_to_attr:
             raise RuntimeError(f"Unknown event name '{event_name}'")
@@ -455,7 +553,7 @@ class RemovableEventHandle:
     """
 
     def __init__(
-        self, event_name: Union[CallableEventWithFilter, Enum, EventsList, Events], handler: Callable, engine: "Engine"
+        self, event_name: CallableEventWithFilter | Enum | EventsList | Events, handler: Callable, engine: "Engine"
     ) -> None:
         self.event_name = event_name
         self.handler = weakref.ref(handler)
@@ -468,6 +566,14 @@ class RemovableEventHandle:
 
         if handler is None or engine is None:
             return
+
+        if hasattr(handler, "_parent"):
+            handler = handler._parent()
+            if handler is None:
+                raise RuntimeError(
+                    "Internal error! Please fill an issue on https://github.com/pytorch/ignite/issues "
+                    "if encounter this error. Thank you!"
+                )
 
         if isinstance(self.event_name, EventsList):
             for e in self.event_name:

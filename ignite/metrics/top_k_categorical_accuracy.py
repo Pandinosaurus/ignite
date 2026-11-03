@@ -1,4 +1,4 @@
-from typing import Callable, Sequence, Union
+from collections.abc import Callable, Sequence
 
 import torch
 
@@ -12,7 +12,7 @@ class TopKCategoricalAccuracy(Metric):
     """
     Calculates the top-k categorical accuracy.
 
-    - ``update`` must receive output of the form ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y}``.
+    - ``update`` must receive output of the form ``(y_pred, y)``.
 
     Args:
         k: the k in “top-k”.
@@ -24,12 +24,20 @@ class TopKCategoricalAccuracy(Metric):
         device: specifies which device updates are accumulated on. Setting the
             metric's device to be the same as your ``update`` arguments ensures the ``update`` method is
             non-blocking. By default, CPU.
+        skip_unrolling: specifies whether output should be unrolled before being fed to update method. Should be
+            true for multi-output model, for example, if ``y_pred`` contains multi-output as ``(y_pred_a, y_pred_b)``
+            Alternatively, ``output_transform`` can be used to handle this.
 
     Examples:
         To use with ``Engine`` and ``process_function``, simply attach the metric instance to the engine.
         The output of the engine's ``process_function`` needs to be in the format of
-        ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y, ...}``. If not, ``output_tranform`` can be added
+        ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y, ...}``. If not, ``output_transform`` can be added
         to the metric to transform the output into the form expected by the metric.
+
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
 
         .. testcode::
 
@@ -47,13 +55,13 @@ class TopKCategoricalAccuracy(Metric):
                 k=2, output_transform=one_hot_to_binary_output_transform)
             metric.attach(engine, 'top_k_accuracy')
 
-            preds = torch.Tensor([
+            preds = torch.tensor([
                 [0.7, 0.2, 0.05, 0.05],     # 1 is in the top 2
                 [0.2, 0.3, 0.4, 0.1],       # 0 is not in the top 2
                 [0.4, 0.4, 0.1, 0.1],       # 0 is in the top 2
                 [0.7, 0.05, 0.2, 0.05]      # 2 is in the top 2
             ])
-            target = torch.Tensor([         # targets as one-hot vectors
+            target = torch.tensor([         # targets as one-hot vectors
                 [0, 1, 0, 0],
                 [1, 0, 0, 0],
                 [1, 0, 0, 0],
@@ -66,15 +74,21 @@ class TopKCategoricalAccuracy(Metric):
         .. testoutput::
 
             0.75
+
+    .. versionchanged:: 0.5.1
+        ``skip_unrolling`` argument is added.
     """
+
+    _state_dict_all_req_keys = ("_num_correct", "_num_examples")
 
     def __init__(
         self,
         k: int = 5,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
+        skip_unrolling: bool = False,
     ) -> None:
-        super(TopKCategoricalAccuracy, self).__init__(output_transform, device=device)
+        super().__init__(output_transform, device=device, skip_unrolling=skip_unrolling)
         self._k = k
 
     @reinit__is_reduced
@@ -93,7 +107,7 @@ class TopKCategoricalAccuracy(Metric):
         self._num_examples += correct.shape[0]
 
     @sync_all_reduce("_num_correct", "_num_examples")
-    def compute(self) -> Union[float, torch.Tensor]:
+    def compute(self) -> float | torch.Tensor:
         if self._num_examples == 0:
             raise NotComputableError(
                 "TopKCategoricalAccuracy must have at least one example before it can be computed."

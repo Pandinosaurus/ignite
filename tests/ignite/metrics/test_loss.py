@@ -5,7 +5,7 @@ import pytest
 import torch
 from numpy.testing import assert_almost_equal
 from torch import nn
-from torch.nn.functional import nll_loss
+from torch.nn.functional import mse_loss, nll_loss
 
 import ignite.distributed as idist
 from ignite.engine import State
@@ -14,8 +14,8 @@ from ignite.metrics import Loss, Precision
 
 
 class DummyLoss1(Loss):
-    def __init__(self, loss_fn, true_output, output_transform=lambda x: x):
-        super(DummyLoss1, self).__init__(loss_fn, output_transform=output_transform)
+    def __init__(self, loss_fn, true_output, output_transform=lambda x: x, device="cpu"):
+        super().__init__(loss_fn, output_transform=output_transform, device=device)
         print(true_output)
         self.true_output = true_output
 
@@ -26,27 +26,26 @@ class DummyLoss1(Loss):
         pass
 
     def update(self, output):
-
         assert output == self.true_output
 
 
-def test_output_as_mapping_without_criterion_kwargs():
-    y_pred = torch.Tensor([[2.0], [-2.0]])
+def test_output_as_mapping_without_criterion_kwargs(available_device):
+    y_pred = torch.tensor([[2.0], [-2.0]])
     y = torch.zeros(2)
     criterion_kwargs = {}
 
-    loss_metric = DummyLoss1(nll_loss, true_output=(y_pred, y, criterion_kwargs))
+    loss_metric = DummyLoss1(nll_loss, true_output=(y_pred, y, criterion_kwargs), device=available_device)
     state = State(output=({"y_pred": y_pred, "y": y, "criterion_kwargs": {}}))
     engine = MagicMock(state=state)
     loss_metric.iteration_completed(engine)
 
 
-def test_output_as_mapping_with_criterion_kwargs():
-    y_pred = torch.Tensor([[2.0], [-2.0]])
+def test_output_as_mapping_with_criterion_kwargs(available_device):
+    y_pred = torch.tensor([[2.0], [-2.0]])
     y = torch.zeros(2)
     criterion_kwargs = {"reduction": "sum"}
 
-    loss_metric = DummyLoss1(nll_loss, true_output=(y_pred, y, criterion_kwargs))
+    loss_metric = DummyLoss1(nll_loss, true_output=(y_pred, y, criterion_kwargs), device=available_device)
     state = State(output=({"y_pred": y_pred, "y": y, "criterion_kwargs": {"reduction": "sum"}}))
     engine = MagicMock(state=state)
     loss_metric.iteration_completed(engine)
@@ -78,34 +77,18 @@ def test_zero_div():
         loss.compute()
 
 
-def test_compute():
-    def _test(y_test_1, y_test_2):
-        loss = Loss(nll_loss)
+@pytest.mark.parametrize("criterion", [nll_loss, nn.NLLLoss()])
+def test_compute(criterion, available_device):
+    loss = Loss(criterion, device=available_device)
+    assert loss._device == torch.device(available_device)
 
-        y_pred, y, expected_loss = y_test_1
-        loss.update((y_pred, y))
-        assert_almost_equal(loss.compute(), expected_loss)
+    y_pred, y, expected_loss = y_test_1()
+    loss.update((y_pred, y))
+    assert_almost_equal(loss.compute(), expected_loss)
 
-        y_pred, y, expected_loss = y_test_2
-        loss.update((y_pred, y))
-        assert_almost_equal(loss.compute(), expected_loss)  # average
-
-    _test(y_test_1(), y_test_2())
-
-
-def test_compute_on_criterion():
-    def _test(y_test_1, y_test_2):
-        loss = Loss(nn.NLLLoss())
-
-        y_pred, y, expected_loss = y_test_1
-        loss.update((y_pred, y))
-        assert_almost_equal(loss.compute(), expected_loss)
-
-        y_pred, y, expected_loss = y_test_2
-        loss.update((y_pred, y))
-        assert_almost_equal(loss.compute(), expected_loss)  # average
-
-    _test(y_test_1(), y_test_2())
+    y_pred, y, expected_loss = y_test_2()
+    loss.update((y_pred, y))
+    assert_almost_equal(loss.compute(), expected_loss)  # average
 
 
 def test_non_averaging_loss():
@@ -116,26 +99,28 @@ def test_non_averaging_loss():
         loss.update((y_pred, y))
 
 
-def test_gradient_based_loss():
+def test_gradient_based_loss(available_device):
     # Tests https://github.com/pytorch/ignite/issues/1674
     x = torch.tensor([[0.1, 0.4, 0.5], [0.1, 0.7, 0.2]], requires_grad=True)
     y_pred = x.mm(torch.randn(size=(3, 1)))
 
     def loss_fn(y_pred, x):
         gradients = torch.autograd.grad(
-            outputs=y_pred, inputs=x, grad_outputs=torch.ones_like(y_pred), create_graph=True,
+            outputs=y_pred, inputs=x, grad_outputs=torch.ones_like(y_pred), create_graph=True
         )[0]
 
         gradients = gradients.flatten(start_dim=1)
 
         return gradients.norm(2, dim=1).mean()
 
-    loss = Loss(loss_fn)
+    loss = Loss(loss_fn, device=available_device)
+    assert loss._device == torch.device(available_device)
     loss.update((y_pred, x))
 
 
-def test_kwargs_loss():
-    loss = Loss(nll_loss)
+def test_kwargs_loss(available_device):
+    loss = Loss(nll_loss, device=available_device)
+    assert loss._device == torch.device(available_device)
 
     y_pred, y, _ = y_test_1()
     kwargs = {"weight": torch.tensor([0.1, 0.1, 0.1])}
@@ -165,7 +150,7 @@ def _test_distrib_compute_on_criterion(device, y_test_1, y_test_2, tol=None):
         n = loss._num_examples
         assert n == len(y)
         res = loss.compute()
-        assert n * idist.get_world_size() == loss._num_examples
+        assert n == loss._num_examples
 
         y_pred = idist.all_gather(y_pred)
         y = idist.all_gather(y)
@@ -177,7 +162,7 @@ def _test_distrib_compute_on_criterion(device, y_test_1, y_test_2, tol=None):
         loss.update((y_pred, y))
         n = loss._num_examples
         res = loss.compute()
-        assert n * idist.get_world_size() == loss._num_examples
+        assert n == loss._num_examples
 
         y_pred = idist.all_gather(y_pred)
         y = idist.all_gather(y)
@@ -193,23 +178,22 @@ def _test_distrib_compute_on_criterion(device, y_test_1, y_test_2, tol=None):
 
 
 def _test_distrib_accumulator_device(device, y_test_1):
-
     metric_devices = [torch.device("cpu")]
     if device.type != "xla":
         metric_devices.append(idist.device())
     for metric_device in metric_devices:
         loss = Loss(nll_loss, device=metric_device)
         assert loss._device == metric_device
-        assert (
-            loss._sum.device == metric_device
-        ), f"{type(loss._sum.device)}:{loss._sum.device} vs {type(metric_device)}:{metric_device}"
+        assert loss._sum.device == metric_device, (
+            f"{type(loss._sum.device)}:{loss._sum.device} vs {type(metric_device)}:{metric_device}"
+        )
 
         y_pred, y, _ = y_test_1
         loss.update((y_pred, y))
 
-        assert (
-            loss._sum.device == metric_device
-        ), f"{type(loss._sum.device)}:{loss._sum.device} vs {type(metric_device)}:{metric_device}"
+        assert loss._sum.device == metric_device, (
+            f"{type(loss._sum.device)}:{loss._sum.device} vs {type(metric_device)}:{metric_device}"
+        )
 
 
 def test_sum_detached():
@@ -225,7 +209,6 @@ def test_sum_detached():
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
 def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
-
     device = idist.device()
     _test_distrib_compute_on_criterion(device, y_test_1(), y_test_2())
     _test_distrib_accumulator_device(device, y_test_1())
@@ -234,7 +217,6 @@ def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
-
     device = idist.device()
     _test_distrib_compute_on_criterion(device, y_test_1(), y_test_2())
     _test_distrib_accumulator_device(device, y_test_1())
@@ -244,7 +226,6 @@ def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
 @pytest.mark.skipif(not idist.has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_distrib_hvd(gloo_hvd_executor):
-
     device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
     nproc = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
 
@@ -256,14 +237,12 @@ def test_distrib_hvd(gloo_hvd_executor):
 @pytest.mark.skipif("NUM_TPU_WORKERS" in os.environ, reason="Skip if NUM_TPU_WORKERS is in env vars")
 @pytest.mark.skipif(not idist.has_xla_support, reason="Skip if no PyTorch XLA package")
 def test_distrib_single_device_xla():
-
     device = idist.device()
     _test_distrib_compute_on_criterion(device, y_test_1(), y_test_2())
     _test_distrib_accumulator_device(device, y_test_1())
 
 
 def _test_distrib_xla_nprocs(index):
-
     device = idist.device()
     _test_distrib_compute_on_criterion(device, y_test_1(), y_test_2())
     _test_distrib_accumulator_device(device, y_test_1())
@@ -281,7 +260,6 @@ def test_distrib_xla_nprocs(xmp_executor):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
-
     device = idist.device()
     _test_distrib_compute_on_criterion(device, y_test_1(), y_test_2(), tol=1e-6)
     _test_distrib_accumulator_device(device, y_test_1())
@@ -291,7 +269,6 @@ def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("GPU_MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_nccl_gpu(distributed_context_multi_node_nccl):
-
     device = idist.device()
     _test_distrib_compute_on_criterion(device, y_test_1(), y_test_2())
     _test_distrib_accumulator_device(device, y_test_1())
@@ -340,3 +317,52 @@ def test_override_required_output_keys():
         (torch.rand(4, 10), torch.randint(0, 3, size=(4,))),
     ]
     evaluator.run(data)
+
+
+class CustomMultiMSELoss(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(
+        self, y_pred: tuple[torch.Tensor, torch.Tensor], y_true: tuple[torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor:
+        a_true, b_true = y_true
+        a_pred, b_pred = y_pred
+        return mse_loss(a_pred, a_true) + mse_loss(b_pred, b_true)
+
+
+class DummyLoss3(Loss):
+    def __init__(self, loss_fn, expected_loss, output_transform=lambda x: x, skip_unrolling=False, device="cpu"):
+        super().__init__(loss_fn, output_transform=output_transform, skip_unrolling=skip_unrolling, device=device)
+        self._expected_loss = expected_loss
+        self._loss_fn = loss_fn
+
+    def reset(self):
+        pass
+
+    def compute(self):
+        pass
+
+    def update(self, output):
+        y_pred, y_true = output
+        calculated_loss = self._loss_fn(y_pred=y_pred, y_true=y_true)
+        assert calculated_loss == self._expected_loss
+
+
+def test_skip_unrolling_loss(available_device):
+    a_pred = torch.rand(8, 1)
+    b_pred = torch.rand(8, 1)
+    y_pred = [a_pred, b_pred]
+    a_true = torch.rand(8, 1)
+    b_true = torch.rand(8, 1)
+    y_true = [a_true, b_true]
+
+    multi_output_mse_loss = CustomMultiMSELoss()
+    expected_loss = multi_output_mse_loss(y_pred=y_pred, y_true=y_true)
+
+    loss_metric = DummyLoss3(
+        loss_fn=multi_output_mse_loss, expected_loss=expected_loss, skip_unrolling=True, device=available_device
+    )
+    state = State(output=(y_pred, y_true))
+    engine = MagicMock(state=state)
+    loss_metric.iteration_completed(engine)

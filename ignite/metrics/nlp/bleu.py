@@ -1,7 +1,9 @@
 import math
-from typing import Any, Callable, Sequence, Tuple, Union
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import torch
+from torch import Tensor
 
 from ignite.exceptions import NotComputableError
 from ignite.metrics.metric import Metric, reinit__is_reduced, sync_all_reduce
@@ -49,7 +51,6 @@ class _Smoother:
 
     @staticmethod
     def _smooth2(numerators: torch.Tensor, denominators: torch.Tensor) -> Sequence[float]:
-
         return [
             (n.item() + 1) / (d.item() + 1) if i != 0 else n.item() / d.item()
             for i, (n, d) in enumerate(zip(numerators, denominators))
@@ -72,11 +73,11 @@ class Bleu(Metric):
 
     More details can be found in `Papineni et al. 2002`__.
 
-    __ https://www.aclweb.org/anthology/P02-1040
+    __ https://aclanthology.org/P02-1040/
 
     In addition, a review of smoothing techniques can be found in `Chen et al. 2014`__
 
-    __ http://acl2014.org/acl2014/W14-33/pdf/W14-3346.pdf
+    __ https://aclanthology.org/W14-3346/
 
     - ``update`` must receive output of the form ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y}``.
     - `y_pred` (list(list(str))) - a list of hypotheses sentences.
@@ -104,6 +105,8 @@ class Bleu(Metric):
 
     Examples:
 
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
         .. testcode::
 
             from ignite.metrics.nlp import Bleu
@@ -122,8 +125,10 @@ class Bleu(Metric):
             tensor(0.0393, dtype=torch.float64)
 
     .. versionadded:: 0.4.5
-    .. versionchanged:: 0.5.0
-        added ``average`` option to handle micro and macro averaging modes.
+    .. versionchanged:: 0.4.7
+
+        - ``update`` method has changed and now works on batch of inputs.
+        - added ``average`` option to handle micro and macro averaging modes.
     """
 
     def __init__(
@@ -131,7 +136,7 @@ class Bleu(Metric):
         ngram: int = 4,
         smooth: str = "no_smooth",
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
         average: str = "macro",
     ):
         if ngram <= 0:
@@ -144,7 +149,12 @@ class Bleu(Metric):
             raise ValueError(f'Average must be either "macro" or "micro" (got: {average})')
         self.average = average
 
-        super(Bleu, self).__init__(output_transform=output_transform, device=device)
+        if average == "micro":
+            self._state_dict_all_req_keys = ("p_numerators", "p_denominators", "hyp_length_sum", "ref_length_sum")
+        else:
+            self._state_dict_all_req_keys = ("_sum_of_bleu", "_num_sentences")
+
+        super().__init__(output_transform=output_transform, device=device)
 
     def _n_gram_counter(
         self,
@@ -152,12 +162,10 @@ class Bleu(Metric):
         candidates: Sequence[Sequence[Any]],
         p_numerators: torch.Tensor,
         p_denominators: torch.Tensor,
-    ) -> Tuple[int, int]:
-
+    ) -> tuple[int, int]:
         if len(references) != len(candidates):
             raise ValueError(
-                f"nb of candidates should be equal to nb of reference lists ({len(candidates)} != "
-                f"{len(references)})"
+                f"nb of candidates should be equal to nb of reference lists ({len(candidates)} != {len(references)})"
             )
 
         hyp_lengths = 0
@@ -181,9 +189,8 @@ class Bleu(Metric):
         return hyp_lengths, ref_lengths
 
     def _brevity_penalty_smoothing(
-        self, p_numerators: torch.Tensor, p_denominators: torch.Tensor, hyp_length_sum: int, ref_length_sum: int,
+        self, p_numerators: torch.Tensor, p_denominators: torch.Tensor, hyp_length_sum: int, ref_length_sum: int
     ) -> float:
-
         # Returns 0 if there's no matching n-grams
         # We only need to check for p_numerators[1] == 0, since if there's
         # no unigrams, there won't be any higher order ngrams.
@@ -208,18 +215,15 @@ class Bleu(Metric):
         gm = bp * math.exp(math.fsum(s))
         return gm
 
-    def _sentence_bleu(self, references: Sequence[Sequence[Any]], candidates: Sequence[Any],) -> float:
+    def _sentence_bleu(self, references: Sequence[Sequence[Any]], candidates: Sequence[Any]) -> float:
         return self._corpus_bleu([references], [candidates])
 
-    def _corpus_bleu(
-        self, references: Sequence[Sequence[Sequence[Any]]], candidates: Sequence[Sequence[Any]],
-    ) -> float:
-
+    def _corpus_bleu(self, references: Sequence[Sequence[Sequence[Any]]], candidates: Sequence[Sequence[Any]]) -> float:
         p_numerators: torch.Tensor = torch.zeros(self.ngrams_order + 1)
         p_denominators: torch.Tensor = torch.zeros(self.ngrams_order + 1)
 
         hyp_length_sum, ref_length_sum = self._n_gram_counter(
-            references=references, candidates=candidates, p_numerators=p_numerators, p_denominators=p_denominators,
+            references=references, candidates=candidates, p_numerators=p_numerators, p_denominators=p_denominators
         )
         bleu_score = self._brevity_penalty_smoothing(
             p_numerators=p_numerators,
@@ -232,20 +236,22 @@ class Bleu(Metric):
 
     @reinit__is_reduced
     def reset(self) -> None:
-
         if self.average == "macro":
-            self._sum_of_bleu = torch.tensor(0.0, dtype=torch.double, device=self._device)
+            self._sum_of_bleu = torch.tensor(0.0, dtype=self._double_dtype, device=self._device)
             self._num_sentences = 0
 
         if self.average == "micro":
-            self.p_numerators = torch.zeros(self.ngrams_order + 1)
-            self.p_denominators = torch.zeros(self.ngrams_order + 1)
+            self.p_numerators = torch.zeros(self.ngrams_order + 1, dtype=self._double_dtype)
+            self.p_denominators = torch.zeros(self.ngrams_order + 1, dtype=self._double_dtype)
             self.hyp_length_sum = 0
             self.ref_length_sum = 0
 
     @reinit__is_reduced
-    def update(self, output: Tuple[Sequence[Sequence[Any]], Sequence[Sequence[Sequence[Any]]]]) -> None:
+    def update(self, output: tuple[Sequence[Sequence[Any]], Sequence[Sequence[Sequence[Any]]]]) -> None:
         y_pred, y = output
+
+        if len(y) != len(y_pred):
+            raise ValueError(f"nb of candidates should be equal to nb of reference lists ({len(y_pred)} != {len(y)})")
 
         if self.average == "macro":
             for refs, hyp in zip(y, y_pred):
@@ -268,7 +274,6 @@ class Bleu(Metric):
 
     @sync_all_reduce("p_numerators", "p_denominators", "hyp_length_sum", "ref_length_sum")
     def _compute_micro(self) -> float:
-
         bleu_score = self._brevity_penalty_smoothing(
             p_numerators=self.p_numerators,
             p_denominators=self.p_denominators,
@@ -277,8 +282,9 @@ class Bleu(Metric):
         )
         return bleu_score
 
-    def compute(self) -> None:
+    def compute(self) -> None | Tensor | float:
         if self.average == "macro":
             return self._compute_macro()
         elif self.average == "micro":
             return self._compute_micro()
+        return None

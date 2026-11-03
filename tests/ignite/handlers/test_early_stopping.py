@@ -13,14 +13,13 @@ def do_nothing_update_fn(engine, batch):
 
 
 def test_args_validation():
-
     trainer = Engine(do_nothing_update_fn)
 
     with pytest.raises(ValueError, match=r"Argument patience should be positive integer."):
         EarlyStopping(patience=-1, score_function=lambda engine: 0, trainer=trainer)
 
-    with pytest.raises(ValueError, match=r"Argument min_delta should not be a negative number."):
-        EarlyStopping(patience=2, min_delta=-0.1, score_function=lambda engine: 0, trainer=trainer)
+    with pytest.raises(ValueError, match=r"Argument threshold should not be a negative number."):
+        EarlyStopping(patience=2, threshold=-0.1, score_function=lambda engine: 0, trainer=trainer)
 
     with pytest.raises(TypeError, match=r"Argument score_function should be a function."):
         EarlyStopping(patience=2, score_function=12345, trainer=trainer)
@@ -28,9 +27,14 @@ def test_args_validation():
     with pytest.raises(TypeError, match=r"Argument trainer should be an instance of Engine."):
         EarlyStopping(patience=2, score_function=lambda engine: 0, trainer=None)
 
+    with pytest.raises(ValueError, match=r"Argument threshold_mode should be either 'abs' or 'rel'."):
+        EarlyStopping(patience=2, threshold_mode="invalid_mode", score_function=lambda engine: 0, trainer=trainer)
+
+    with pytest.raises(ValueError, match=r"Argument mode should be either 'min' or 'max'."):
+        EarlyStopping(patience=2, mode="invalid_mode", score_function=lambda engine: 0, trainer=trainer)
+
 
 def test_simple_early_stopping():
-
     scores = iter([1.0, 0.8, 0.88])
 
     def score_function(engine):
@@ -50,7 +54,6 @@ def test_simple_early_stopping():
 
 
 def test_state_dict():
-
     scores = iter([1.0, 0.8, 0.88])
 
     def score_function(engine):
@@ -74,13 +77,40 @@ def test_state_dict():
     assert trainer.should_terminate
 
 
-def test_early_stopping_on_delta():
+def test_state_dict_with_mode():
+    scores = iter([1.0, 2.0, 2.1, 2.2])
 
+    def score_function(engine):
+        return next(scores)
+
+    trainer = Engine(do_nothing_update_fn)
+
+    # Use "rel" mode
+    h = EarlyStopping(patience=2, score_function=score_function, trainer=trainer, threshold=0.1, threshold_mode="rel")
+    h(None)  # best_score=1.0
+    h(None)  # score=2.0 (improvement)
+
+    state = h.state_dict()
+
+    # New handler with "rel" mode
+    h2 = EarlyStopping(patience=2, score_function=score_function, trainer=trainer, threshold=0.1, threshold_mode="rel")
+    h2.load_state_dict(state)
+
+    assert h2.threshold_mode == "rel"
+    h2(None)  # score=2.1 (no improvement: 2.1 <= 2.0 * 1.1 = 2.2)
+    assert h2.counter == 1
+    assert not trainer.should_terminate
+    h2(None)  # score=2.2 (no improvement: 2.2 <= 2.2)
+    assert h2.counter == 2
+    assert trainer.should_terminate
+
+
+def test_early_stopping_on_threshold():
     scores = iter([1.0, 2.0, 2.01, 3.0, 3.01, 3.02])
 
     trainer = Engine(do_nothing_update_fn)
 
-    h = EarlyStopping(patience=2, min_delta=0.1, score_function=lambda _: next(scores), trainer=trainer)
+    h = EarlyStopping(patience=2, threshold=0.1, score_function=lambda _: next(scores), trainer=trainer)
 
     assert not trainer.should_terminate
     h(None)  # counter == 0
@@ -97,14 +127,38 @@ def test_early_stopping_on_delta():
     assert trainer.should_terminate
 
 
-def test_early_stopping_on_last_event_delta():
+def test_early_stopping_on_rel_delta():
+    scores = iter([1.0, 2.0, 2.1, 3.0, 3.2, 3.25])
 
+    trainer = Engine(do_nothing_update_fn)
+
+    # upper_bound = best_score * (1 + threshold)
+    h = EarlyStopping(
+        patience=2, threshold=0.1, threshold_mode="rel", score_function=lambda _: next(scores), trainer=trainer
+    )
+
+    assert not trainer.should_terminate
+    h(None)  # best_score = 1.0; counter == 0
+    assert not trainer.should_terminate
+    h(None)  # score = 2.0; upper_bound = 1.0 * (1.1) = 1.1; 2.0 > 1.1; best_score = 2.0; counter == 0
+    assert not trainer.should_terminate
+    h(None)  # score = 2.1; upper_bound = 2.0 * (1.1) = 2.2; 2.1 <= 2.2; counter == 1
+    assert not trainer.should_terminate
+    h(None)  # score = 3.0; upper_bound = 2.0 * (1.1) = 2.2; 3.0 > 2.2; best_score = 3.0; counter == 0
+    assert not trainer.should_terminate
+    h(None)  # score = 3.2; upper_bound = 3.0 * (1.1) = 3.3; 3.2 <= 3.3; counter == 1
+    assert not trainer.should_terminate
+    h(None)  # score = 3.25; upper_bound = 3.0 * (1.1) = 3.3; 3.25 <= 3.3; counter == 2
+    assert trainer.should_terminate
+
+
+def test_early_stopping_on_last_event_threshold():
     scores = iter([0.0, 0.3, 0.6])
 
     trainer = Engine(do_nothing_update_fn)
 
     h = EarlyStopping(
-        patience=2, min_delta=0.4, cumulative_delta=False, score_function=lambda _: next(scores), trainer=trainer
+        patience=2, threshold=0.4, cumulative=False, score_function=lambda _: next(scores), trainer=trainer
     )
 
     assert not trainer.should_terminate
@@ -116,14 +170,13 @@ def test_early_stopping_on_last_event_delta():
     assert trainer.should_terminate
 
 
-def test_early_stopping_on_cumulative_delta():
-
+def test_early_stopping_on_cumulative():
     scores = iter([0.0, 0.3, 0.6])
 
     trainer = Engine(do_nothing_update_fn)
 
     h = EarlyStopping(
-        patience=2, min_delta=0.4, cumulative_delta=True, score_function=lambda _: next(scores), trainer=trainer
+        patience=2, threshold=0.4, cumulative=True, score_function=lambda _: next(scores), trainer=trainer
     )
 
     assert not trainer.should_terminate
@@ -151,7 +204,6 @@ def test_simple_early_stopping_on_plateau():
 
 
 def test_simple_no_early_stopping():
-
     scores = iter([1.0, 0.8, 1.2])
 
     def score_function(engine):
@@ -247,8 +299,94 @@ def test_with_engine_no_early_stopping():
     assert trainer.state.epoch == 10
 
 
-def _test_distrib_with_engine_early_stopping(device):
+def test_simple_early_stopping_min_mode():
+    scores = iter([1.0, 1.2, 0.9])
 
+    def score_function(engine):
+        return next(scores)
+
+    trainer = Engine(do_nothing_update_fn)
+
+    h = EarlyStopping(patience=2, score_function=score_function, trainer=trainer, mode="min")
+    # Call 3 times and check if stopped
+    assert not trainer.should_terminate
+    h(None)  # best_score=1.0
+    assert not trainer.should_terminate
+    h(None)  # score=1.2 (no improvement)
+    assert not trainer.should_terminate
+    h(None)  # score=0.9 (improvement)
+    assert not trainer.should_terminate
+
+
+def test_early_stopping_min_mode_with_delta():
+    scores = iter([1.1, 0.95, 0.94, 0.93])
+
+    trainer = Engine(do_nothing_update_fn)
+
+    h = EarlyStopping(patience=2, threshold=0.1, score_function=lambda _: next(scores), trainer=trainer, mode="min")
+
+    assert not trainer.should_terminate
+    h(None)  # best_score=1.1
+    assert not trainer.should_terminate
+    h(None)  # score=0.95 (improvement: 0.95 < 1.1 - 0.1 = 1.0)
+    assert not trainer.should_terminate
+    h(None)  # score=0.94 (no improvement: 0.94 >= 0.95 - 0.1 = 0.85)
+    assert not trainer.should_terminate
+    h(None)  # score=0.93 (no improvement: 0.93 >= 0.95 - 0.1 = 0.85)
+    assert trainer.should_terminate
+
+
+def test_early_stopping_min_mode_with_threshold_cumulative():
+    scores = iter([1.1, 0.95, 0.94, 0.93])
+
+    trainer = Engine(do_nothing_update_fn)
+
+    h = EarlyStopping(
+        patience=2,
+        threshold=0.1,
+        score_function=lambda _: next(scores),
+        trainer=trainer,
+        cumulative=True,
+        mode="min",
+    )
+
+    assert not trainer.should_terminate
+    h(None)  # best_score=1.1
+    assert not trainer.should_terminate
+    h(None)  # score=0.95 (improvement: 0.95 < 1.1 - 0.1 = 1.0)
+    assert not trainer.should_terminate
+    h(None)  # score=0.94 (no improvement: 0.94 >= 0.95 - 0.1 = 0.85)
+    assert not trainer.should_terminate
+    h(None)  # score=0.93 (no improvement: 0.93 >= 0.94 - 0.1 = 0.84)
+    assert trainer.should_terminate
+
+
+def test_early_stopping_min_mode_rel_delta():
+    scores = iter([1.0, 0.8, 0.79, 0.78])
+
+    trainer = Engine(do_nothing_update_fn)
+
+    h = EarlyStopping(
+        patience=2,
+        threshold=0.1,
+        threshold_mode="rel",
+        score_function=lambda _: next(scores),
+        trainer=trainer,
+        mode="min",
+    )
+
+    assert not trainer.should_terminate
+    h(None)  # best_score=1.0
+    assert not trainer.should_terminate
+    h(None)  # score=0.8 (improvement: 0.8 < 1.0 * (1 - 0.1) = 0.9)
+    assert not trainer.should_terminate
+    h(None)  # score=0.79 (no improvement: 0.79 >= 0.8 * (1 - 0.1) = 0.72)
+    assert not trainer.should_terminate
+    h(None)  # score=0.78 (no improvement)
+    assert trainer.should_terminate
+
+
+def _test_distrib_with_engine_early_stopping(device):
     if device is None:
         device = idist.device()
     if isinstance(device, str):
@@ -287,7 +425,6 @@ def _test_distrib_with_engine_early_stopping(device):
 
 
 def _test_distrib_integration_engine_early_stopping(device):
-
     from ignite.metrics import Accuracy
 
     if device is None:
@@ -346,7 +483,6 @@ def _test_distrib_integration_engine_early_stopping(device):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
 def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
-
     device = idist.device()
     _test_distrib_with_engine_early_stopping(device)
     _test_distrib_integration_engine_early_stopping(device)
@@ -355,7 +491,6 @@ def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
-
     device = idist.device()
     _test_distrib_with_engine_early_stopping(device)
     _test_distrib_integration_engine_early_stopping(device)
@@ -365,7 +500,6 @@ def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
 @pytest.mark.skipif(not idist.has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_distrib_hvd(gloo_hvd_executor):
-
     device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
     nproc = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
 
@@ -377,7 +511,6 @@ def test_distrib_hvd(gloo_hvd_executor):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
-
     device = idist.device()
     _test_distrib_with_engine_early_stopping(device)
     _test_distrib_integration_engine_early_stopping(device)
@@ -387,7 +520,6 @@ def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("GPU_MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_nccl_gpu(distributed_context_multi_node_nccl):
-
     device = idist.device()
     _test_distrib_with_engine_early_stopping(device)
     _test_distrib_integration_engine_early_stopping(device)
@@ -414,3 +546,112 @@ def _test_distrib_xla_nprocs(index):
 def test_distrib_xla_nprocs(xmp_executor):
     n = int(os.environ["NUM_TPU_WORKERS"])
     xmp_executor(_test_distrib_xla_nprocs, args=(), nprocs=n)
+
+
+def test_early_stopping_reset():
+    trainer = Engine(do_nothing_update_fn)
+    handler = EarlyStopping(patience=5, score_function=lambda engine: engine.state.iteration, trainer=trainer)
+
+    handler.best_score = 99.0
+    handler.counter = 3
+
+    handler.reset()
+    assert handler.best_score is None
+    assert handler.counter == 0
+
+
+def test_early_stopping_attach():
+    trainer = Engine(do_nothing_update_fn)
+    handler = EarlyStopping(patience=5, score_function=lambda engine: engine.state.iteration, trainer=trainer)
+
+    handler.attach(trainer)
+
+    assert trainer.has_event_handler(handler, Events.COMPLETED)
+    assert trainer.has_event_handler(handler.reset, Events.STARTED)
+
+
+def test_early_stopping_attach_cross_engine():
+    trainer = Engine(do_nothing_update_fn)
+    evaluator = Engine(do_nothing_update_fn)
+    handler = EarlyStopping(patience=5, score_function=lambda engine: engine.state.iteration, trainer=trainer)
+
+    handler.attach(engine=evaluator, event=Events.EPOCH_COMPLETED, reset_engine=trainer, reset_event=Events.STARTED)
+
+    assert evaluator.has_event_handler(handler, Events.EPOCH_COMPLETED)
+    assert not trainer.has_event_handler(handler, Events.EPOCH_COMPLETED)
+
+    assert trainer.has_event_handler(handler.reset, Events.STARTED)
+    assert not evaluator.has_event_handler(handler.reset, Events.STARTED)
+
+
+def test_legacy_api_support():
+    def score_function(engine):
+        return 1.0
+
+    trainer = Engine(lambda e, b: None)
+
+    # Initialize using deprecated args
+    with pytest.warns(DeprecationWarning):
+        h = EarlyStopping(
+            patience=2,
+            score_function=score_function,
+            trainer=trainer,
+            min_delta=0.1,
+            min_delta_mode="rel",
+            cumulative_delta=True,
+        )
+
+    # Access deprecated properties
+    with pytest.warns(DeprecationWarning):
+        assert h.min_delta == 0.1
+
+    with pytest.warns(DeprecationWarning):
+        assert h.min_delta_mode == "rel"
+
+    with pytest.warns(DeprecationWarning):
+        assert h.cumulative_delta is True
+
+
+def test_legacy_args_override_new_args():
+    def score_function(engine):
+        return 1.0
+
+    trainer = Engine(lambda e, b: None)
+
+    with pytest.warns(DeprecationWarning):
+        h = EarlyStopping(
+            patience=2,
+            score_function=score_function,
+            trainer=trainer,
+            threshold=0.5,
+            min_delta=0.1,
+            threshold_mode="abs",
+            min_delta_mode="rel",
+            cumulative=False,
+            cumulative_delta=True,
+        )
+
+    assert h.threshold == 0.1
+    assert h.threshold_mode == "rel"
+    assert h.cumulative is True
+
+
+def test_deprecated_setters():
+    def score_function(engine):
+        return 1.0
+
+    trainer = Engine(lambda e, b: None)
+
+    h = EarlyStopping(patience=2, score_function=score_function, trainer=trainer)
+
+    with pytest.warns(DeprecationWarning):
+        h.min_delta = 0.2
+        assert h.threshold == 0.2
+
+    with pytest.warns(DeprecationWarning):
+        h.min_delta_mode = "abs"
+        assert h.threshold_mode == "abs"
+
+    with pytest.warns(DeprecationWarning):
+        h.cumulative_delta = True
+        assert h.cumulative is True

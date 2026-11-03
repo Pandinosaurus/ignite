@@ -6,14 +6,14 @@ import fire
 import torch
 
 try:
-    from torch.cuda.amp import GradScaler, autocast
+    from torch.amp import autocast, GradScaler
 except ImportError:
-    raise RuntimeError("Please, use recent PyTorch version, e.g. >=1.6.0")
+    raise RuntimeError("Please, use recent PyTorch version, e.g. >=1.12.0")
 
 import dataflow as data
 import utils
 import vis
-from py_config_runner import ConfigObject, InferenceConfigSchema, TrainvalConfigSchema, get_params
+from py_config_runner import ConfigObject, get_params, InferenceConfigSchema, TrainvalConfigSchema
 
 import ignite.distributed as idist
 from ignite.contrib.engines import common
@@ -49,7 +49,6 @@ def download_datasets(output_path):
 
 
 def training(local_rank, config, logger, with_clearml):
-
     rank = idist.get_rank()
     manual_seed(config.seed + local_rank)
 
@@ -80,7 +79,7 @@ def training(local_rank, config, logger, with_clearml):
     val_interval = config.get("val_interval", 1)
 
     # Run validation on every val_interval epoch, in the end of the training
-    # and in the begining if config.start_by_validation is True
+    # and in the beginning if config.start_by_validation is True
     event = Events.EPOCH_COMPLETED(every=val_interval)
     if config.num_epochs % val_interval != 0:
         event |= Events.COMPLETED
@@ -138,7 +137,7 @@ def training(local_rank, config, logger, with_clearml):
         tb_logger.attach(
             evaluator,
             log_handler=vis.predictions_gt_images_handler(
-                img_denormalize_fn=img_denormalize, n_images=15, another_engine=trainer, prefix_tag="validation",
+                img_denormalize_fn=img_denormalize, n_images=8, another_engine=trainer, prefix_tag="validation"
             ),
             event_name=Events.ITERATION_COMPLETED(event_filter=custom_event_filter),
         )
@@ -162,14 +161,20 @@ def compute_and_log_cm(cm_metric, iteration):
         from clearml import Task
 
         clearml_logger = Task.current_task().get_logger()
-        clearml_logger.report_confusion_matrix(
-            title="Final Confusion Matrix",
-            series="cm-preds-gt",
-            matrix=cm,
-            iteration=iteration,
-            xlabels=data.VOCSegmentationOpencv.target_names,
-            ylabels=data.VOCSegmentationOpencv.target_names,
-        )
+
+        try:
+            clearml_logger.report_confusion_matrix(
+                title="Final Confusion Matrix",
+                matrix=cm,
+                iteration=iteration,
+                xlabels=data.VOCSegmentationOpencv.target_names,
+                ylabels=data.VOCSegmentationOpencv.target_names,
+                extra_layout=None,
+            )
+        except NameError:
+            # Temporary clearml bug work-around:
+            # https://github.com/allegroai/clearml/pull/936
+            pass
 
 
 def create_trainer(model, optimizer, criterion, train_sampler, config, logger, with_clearml):
@@ -186,7 +191,7 @@ def create_trainer(model, optimizer, criterion, train_sampler, config, logger, w
     def forward_pass(batch):
         model.train()
         x, y = prepare_batch(batch, device=device, non_blocking=True)
-        with autocast(enabled=with_amp):
+        with autocast("cuda", enabled=with_amp):
             y_pred = model(x)
             y_pred = model_output_transform(y_pred)
             loss = criterion(y_pred, y) / accumulation_steps
@@ -267,7 +272,7 @@ def create_evaluator(model, metrics, config, with_clearml, tag="val"):
     @torch.no_grad()
     def evaluate_step(engine, batch):
         model.eval()
-        with autocast(enabled=with_amp):
+        with autocast("cuda", enabled=with_amp):
             x, y = prepare_batch(batch, device=config.device, non_blocking=True)
             y_pred = model(x)
             y_pred = model_output_transform(y_pred)
@@ -296,7 +301,7 @@ def setup_experiment_tracking(config, with_clearml, task_type="training"):
 
             schema = TrainvalConfigSchema if task_type == "training" else InferenceConfigSchema
 
-            task = Task.init("Pascal-VOC12 Training", config.config_filepath.stem, task_type=task_type,)
+            task = Task.init("Pascal-VOC12 Training", config.config_filepath.stem, task_type=task_type)
             task.connect_configuration(config.config_filepath.as_posix())
 
             task.upload_artifact(config.script_filepath.name, config.script_filepath.as_posix())
@@ -313,12 +318,8 @@ def setup_experiment_tracking(config, with_clearml, task_type="training"):
             output_path = output_path / datetime.now().strftime("%Y%m%d-%H%M%S")
             output_path.mkdir(parents=True, exist_ok=True)
 
-            shutil.copyfile(
-                config.script_filepath.as_posix(), output_path / config.script_filepath.name,
-            )
-            shutil.copyfile(
-                config.config_filepath.as_posix(), output_path / config.config_filepath.name,
-            )
+            shutil.copyfile(config.script_filepath.as_posix(), output_path / config.script_filepath.name)
+            shutil.copyfile(config.config_filepath.as_posix(), output_path / config.config_filepath.name)
 
         output_path = output_path.as_posix()
     return Path(idist.broadcast(output_path, src=0))
@@ -340,7 +341,6 @@ def run_training(config_filepath, backend="nccl", with_clearml=True):
     assert config_filepath.exists(), f"File '{config_filepath.as_posix()}' is not found"
 
     with idist.Parallel(backend=backend) as parallel:
-
         logger = setup_logger(name="Pascal-VOC12 Training", distributed_rank=idist.get_rank())
 
         config = ConfigObject(config_filepath)
@@ -362,7 +362,6 @@ def run_training(config_filepath, backend="nccl", with_clearml=True):
 
 
 def get_model_weights(config, logger, with_clearml):
-
     path = ""
     if with_clearml:
         from clearml import Model
@@ -387,7 +386,6 @@ def get_model_weights(config, logger, with_clearml):
 
 
 def evaluation(local_rank, config, logger, with_clearml):
-
     rank = idist.get_rank()
     device = idist.device()
     manual_seed(config.seed + local_rank)
@@ -419,9 +417,7 @@ def evaluation(local_rank, config, logger, with_clearml):
     # Setup Tensorboard logger
     if rank == 0:
         tb_logger = common.TensorboardLogger(log_dir=config.output_path.as_posix())
-        tb_logger.attach_output_handler(
-            evaluator, event_name=Events.COMPLETED, tag="validation", metric_names="all",
-        )
+        tb_logger.attach_output_handler(evaluator, event_name=Events.COMPLETED, tag="validation", metric_names="all")
 
     # Log confusion matrix to ClearML:
     if with_clearml:
@@ -472,7 +468,4 @@ def run_evaluation(config_filepath, backend="nccl", with_clearml=True):
 
 
 if __name__ == "__main__":
-
-    fire.Fire(
-        {"download": download_datasets, "training": run_training, "eval": run_evaluation,}
-    )
+    fire.Fire({"download": download_datasets, "training": run_training, "eval": run_evaluation})

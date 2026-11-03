@@ -1,11 +1,12 @@
 import inspect
-from typing import Any, Callable, Tuple, Union
+from collections.abc import Callable
+from typing import Any
 
 
 def _check_signature(fn: Callable, fn_description: str, *args: Any, **kwargs: Any) -> None:
     # if handler with filter, check the handler rather than the decorator
     if hasattr(fn, "_parent"):
-        signature = inspect.signature(fn._parent())  # type: ignore[attr-defined]
+        signature = inspect.signature(fn._parent())
     else:
         signature = inspect.signature(fn)
     try:  # try without engine
@@ -21,8 +22,8 @@ def _check_signature(fn: Callable, fn_description: str, *args: Any, **kwargs: An
         )
 
 
-def _to_hours_mins_secs(time_taken: Union[float, int]) -> Tuple[int, int, int]:
-    """Convert seconds to hours, mins, and seconds."""
+def _to_hours_mins_secs(time_taken: float | int) -> tuple[int, int, float]:
+    """Convert seconds to hours, mins, seconds and milliseconds."""
     mins, secs = divmod(time_taken, 60)
     hours, mins = divmod(mins, 60)
-    return round(hours), round(mins), round(secs)
+    return round(hours), round(mins), secs

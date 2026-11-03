@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 from unittest.mock import patch
@@ -123,7 +122,7 @@ def test_profilers_wrong_inputs():
     with pytest.raises(TypeError, match=r"Argument engine should be ignite.engine.Engine"):
         profiler.attach(None)
 
-    with pytest.raises(RuntimeError, match=r"Need pandas to write results as files"):
+    with pytest.raises(ModuleNotFoundError, match=r"Need pandas to write results as files"):
         with patch.dict("sys.modules", {"pandas": None}):
             profiler.write_results("")
 
@@ -131,7 +130,7 @@ def test_profilers_wrong_inputs():
     with pytest.raises(TypeError, match=r"Argument engine should be ignite.engine.Engine"):
         profiler.attach(None)
 
-    with pytest.raises(RuntimeError, match=r"Need pandas to write results as files"):
+    with pytest.raises(ModuleNotFoundError, match=r"Need pandas to write results as files"):
         with patch.dict("sys.modules", {"pandas": None}):
             profiler.write_results("")
 
@@ -794,10 +793,10 @@ def test_write_results_basic_profiler(dirname):
     profiler.attach(dummy_trainer)
 
     dummy_trainer.run(range(true_num_iters), max_epochs=true_max_epochs)
-    fp = os.path.join(dirname, "test_log.csv")
+    fp = dirname / "test_log.csv"
     profiler.write_results(fp)
 
-    assert os.path.isfile(fp)
+    assert fp.is_file()
 
     file_length = 0
     with open(fp) as f:
@@ -817,10 +816,10 @@ def test_write_results_handlers_profiler(dirname):
     profiler.attach(dummy_trainer)
 
     dummy_trainer.run(range(true_num_iters), max_epochs=true_max_epochs)
-    fp = os.path.join(dirname, "test_log.csv")
+    fp = dirname / "test_log.csv"
     profiler.write_results(fp)
 
-    assert os.path.isfile(fp)
+    assert fp.is_file()
 
     file_length = 0
     with open(fp) as f:
@@ -831,7 +830,6 @@ def test_write_results_handlers_profiler(dirname):
 
 
 def test_print_results_basic_profiler(capsys):
-
     true_max_epochs = 1
     true_num_iters = 5
 
@@ -849,7 +847,6 @@ def test_print_results_basic_profiler(capsys):
 
 
 def test_print_results_handlers_profiler_handlers_profiler(capsys):
-
     true_max_epochs = 1
     true_num_iters = 5
 

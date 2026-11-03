@@ -1,7 +1,9 @@
+from pathlib import Path
+
 import pytest
 import torch
 
-from ignite.distributed.comp_models.base import ComputationModel, _SerialModel
+from ignite.distributed.comp_models.base import _SerialModel, _torch_version_gt_112, ComputationModel
 
 
 def test_serial_model():
@@ -16,6 +18,8 @@ def test_serial_model():
     assert model.get_node_rank() == 0
     if torch.cuda.is_available():
         assert model.device().type == "cuda"
+    elif _torch_version_gt_112 and torch.backends.mps.is_available():
+        assert model.device().type == "mps"
     else:
         assert model.device().type == "cpu"
     assert model.backend() is None
@@ -50,10 +54,13 @@ def test__encode_input_data():
     assert encoded_msg == [-1] * 512
 
     encoded_msg = ComputationModel._encode_input_data(12.0, is_src=True)
-    assert encoded_msg == [1,] + [-1] * 511
+    assert encoded_msg == [1] + [-1] * 511
 
     encoded_msg = ComputationModel._encode_input_data("abc", is_src=True)
-    assert encoded_msg == [2,] + [-1] * 511
+    assert encoded_msg == [2] + [-1] * 511
+
+    encoded_msg = ComputationModel._encode_input_data(Path("abc"), is_src=True)
+    assert encoded_msg == [3] + [-1] * 511
 
     t = torch.rand(2, 512, 32, 32, 64)
     encoded_msg = ComputationModel._encode_input_data(t, is_src=True)
@@ -92,6 +99,11 @@ def test__decode_as_placeholder():
     assert isinstance(res, str) and res == ""
 
     encoded_msg = [-1] * 512
+    encoded_msg[0] = 3
+    res = ComputationModel._decode_as_placeholder(encoded_msg, device)
+    assert isinstance(res, Path) and res == Path("")
+
+    encoded_msg = [-1] * 512
     encoded_msg[0] = 0
     encoded_msg[1 : 1 + 7] = [6, 2, 3, 4, 5, 6, 7]
     dtype_str = "torch.int64"
@@ -120,7 +132,7 @@ def test__setup_placeholder():
 
     from ignite.distributed.utils import _model
 
-    for t in [torch.rand(2, 3, 4), "abc", 123.45]:
+    for t in [torch.rand(2, 3, 4), "abc", Path("abc"), 123.45]:
         data = _model._setup_placeholder(t, device, True)
         assert isinstance(data, type(t))
         if isinstance(data, torch.Tensor):

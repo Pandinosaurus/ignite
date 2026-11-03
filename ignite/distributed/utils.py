@@ -1,6 +1,12 @@
+from __future__ import annotations
+
+import itertools
 import socket
+from pathlib import Path
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from functools import wraps
-from typing import Any, Callable, List, Mapping, Optional, Tuple, Union
+from typing import Any, cast
 
 import torch
 
@@ -40,6 +46,9 @@ __all__ = [
     "sync",
     "registered_computation_models",
     "one_rank_only",
+    "new_group",
+    "one_rank_first",
+    "all_gather_tensors_with_shapes",
 ]
 
 _model = _SerialModel()
@@ -87,7 +96,7 @@ def device() -> torch.device:
     return _model.device()
 
 
-def backend() -> Optional[str]:
+def backend() -> str | None:
     """Returns computation model's backend.
 
     - `None` for no distributed configuration
@@ -107,9 +116,9 @@ def backend() -> Optional[str]:
     return _model.backend()
 
 
-def available_backends() -> Tuple[str, ...]:
+def available_backends() -> tuple[str, ...]:
     """Returns available backends."""
-    out = ()  # type: Tuple[str, ...]
+    out: tuple[str, ...] = ()
     for m in registered_computation_models:
         out += m.available_backends
     return out
@@ -133,8 +142,7 @@ def model_name() -> str:
 
 
 def get_world_size() -> int:
-    """Returns world size of current distributed configuration. Returns 1 if no distributed configuration.
-    """
+    """Returns world size of current distributed configuration. Returns 1 if no distributed configuration."""
     if _need_to_sync and isinstance(_model, _SerialModel):
         sync(temporary=True)
 
@@ -142,8 +150,7 @@ def get_world_size() -> int:
 
 
 def get_rank() -> int:
-    """Returns process rank within current distributed configuration. Returns 0 if no distributed configuration.
-    """
+    """Returns process rank within current distributed configuration. Returns 0 if no distributed configuration."""
     if _need_to_sync and isinstance(_model, _SerialModel):
         sync(temporary=True)
 
@@ -151,8 +158,8 @@ def get_rank() -> int:
 
 
 def get_local_rank() -> int:
-    """Returns local process rank within current distributed configuration. Returns 0 if no distributed configuration.
-    """
+    """Returns local process rank within current distributed configuration.
+    Returns 0 if no distributed configuration."""
     if _need_to_sync and isinstance(_model, _SerialModel):
         sync(temporary=True)
 
@@ -190,16 +197,15 @@ def get_node_rank() -> int:
 
 
 def hostname() -> str:
-    """Returns host name for current process within current distributed configuration.
-    """
+    """Returns host name for current process within current distributed configuration."""
     return socket.gethostname()
 
 
 def spawn(
     backend: str,
     fn: Callable,
-    args: Tuple,
-    kwargs_dict: Optional[Mapping] = None,
+    args: tuple,
+    kwargs_dict: Mapping | None = None,
     nproc_per_node: int = 1,
     **kwargs: Any,
 ) -> None:
@@ -304,8 +310,8 @@ def spawn(
             idist.spawn("xla-tpu", train_fn, args=(a, b, c), kwargs_dict={"d": 23}, nproc_per_node=8)
 
     .. _dist.init_process_group: https://pytorch.org/docs/stable/distributed.html#torch.distributed.init_process_group
-    .. _mp.start_processes: https://pytorch.org/docs/stable/multiprocessing.html#torch.multiprocessing.spawn
-    .. _xmp.spawn: http://pytorch.org/xla/release/1.6/index.html#torch_xla.distributed.xla_multiprocessing.spawn
+    .. _mp.start_processes: https://pytorch.org/docs/stable/multiprocessing.html#torch.multiprocessing.spawn.spawn
+    .. _xmp.spawn: https://pytorch.org/xla/release/1.6/index.html#torch_xla.distributed.xla_multiprocessing.spawn
     .. _hvd_run: https://horovod.readthedocs.io/en/latest/api.html#module-horovod.run
 
     .. versionchanged:: 0.4.2
@@ -324,60 +330,125 @@ def spawn(
         )
 
 
-def all_reduce(tensor: Union[torch.Tensor, float], op: str = "SUM") -> Union[torch.Tensor, float]:
+def all_reduce(
+    tensor: torch.Tensor | float, op: str = "SUM", group: Any | list[int] | None = None
+) -> torch.Tensor | float:
     """Helper method to perform all reduce operation.
 
     Args:
         tensor: tensor or number to collect across participating processes.
         op: reduction operation, "SUM" by default. Possible values: "SUM", "PRODUCT", "MIN", "MAX", "AND", "OR".
             Horovod backend supports only "SUM", "AVERAGE", "ADASUM", "MIN", "MAX", "PRODUCT".
+        group: list of integer or the process group for each backend. If None, the default process group will be used.
 
     Returns:
         torch.Tensor or number
 
+    .. versionchanged:: 0.4.11
+        added ``group``
     """
     if _need_to_sync and isinstance(_model, _SerialModel):
         sync(temporary=True)
 
-    return _model.all_reduce(tensor, op)
+    return _model.all_reduce(tensor, op, group=group)
 
 
-def all_gather(tensor: Union[torch.Tensor, float, str]) -> Union[torch.Tensor, float, List[float], List[str]]:
+def all_gather_tensors_with_shapes(
+    tensor: torch.Tensor, shapes: Sequence[Sequence[int]], group: Any | list[int] | None = None
+) -> list[torch.Tensor]:
+    """Helper method to gather tensors of possibly different shapes but with the same number of dimensions
+    across processes.
+
+    This function gets the shapes of participating tensors as input so you should know them beforehand. If your
+    tensors are of different number of dimensions or you don't know their shapes beforehand, you can use
+    ``torch.distributed.all_gather_object``, otherwise this method is quite faster.
+
+    Examples:
+        .. code-block:: python
+
+            import ignite.distributed as idist
+
+            rank = idist.get_rank()
+            ws = idist.get_world_size()
+            tensor = torch.randn(rank+1, rank+2)
+            tensors = idist.all_gather_tensors_with_shapes(tensor, [[r+1, r+2] for r in range(ws)])
+
+    Args:
+        tensor: tensor to collect across participating processes.
+        shapes: A sequence containing the shape of participating processes' ``tensor`` s.
+        group: list of integer or the process group for each backend. If None, the default process group will be used.
+
+    Returns:
+        list[torch.Tensor]
+    """
+    if _need_to_sync and isinstance(_model, _SerialModel):
+        sync(temporary=True)
+
+    if isinstance(group, list) and all(isinstance(item, int) for item in group):
+        group = _model.new_group(group)
+
+    if _rank_not_in_group(group):
+        return [tensor]
+
+    max_shape = torch.tensor(shapes).amax(dim=0)
+    padding_sizes = (max_shape - torch.tensor(tensor.shape)).tolist()
+    padded_tensor = torch.nn.functional.pad(
+        tensor, tuple(itertools.chain.from_iterable(map(lambda dim_size: (0, dim_size), reversed(padding_sizes))))
+    )
+    all_padded_tensors: torch.Tensor = cast(torch.Tensor, _model.all_gather(padded_tensor, group=group))
+    return [
+        all_padded_tensors[
+            [
+                slice(rank * max_shape[0] if dim == 0 else 0, rank * max_shape[0] + dim_size if dim == 0 else dim_size)
+                for dim, dim_size in enumerate(shape)
+            ]
+        ]
+        for rank, shape in enumerate(shapes)
+    ]
+
+
+def all_gather(
+    tensor: torch.Tensor | float | str | Any, group: Any | list[int] | None = None
+) -> torch.Tensor | float | list[float] | list[str] | list[Any]:
     """Helper method to perform all gather operation.
 
     Args:
-        tensor: tensor or number or str to collect across participating processes.
+        tensor: tensor or number or str to collect across participating processes. If tensor, it should have the
+            same shape across processes.
+        group: list of integer or the process group for each backend. If None, the default process group will be used.
 
     Returns:
-        torch.Tensor of shape ``(world_size * tensor.shape[0], tensor.shape[1], ...)`` if input is a tensor or
-        torch.Tensor of shape ``(world_size, )`` if input is a number or
-        List of strings if input is a string
+        If input is a tensor, returns a torch.Tensor of shape ``(world_size * tensor.shape[0], tensor.shape[1], ...)``.
+        If input is a number, a torch.Tensor of shape ``(world_size, )`` is returned and finally a list of strings
+        is returned if input is a string. If current process does not belong to `group`, the very ``tensor`` is
+        returned.
 
+    .. versionchanged:: 0.4.11
+        added ``group``
     """
     if _need_to_sync and isinstance(_model, _SerialModel):
         sync(temporary=True)
 
-    return _model.all_gather(tensor)
+    return _model.all_gather(tensor, group=group)
 
 
 def broadcast(
-    tensor: Union[torch.Tensor, float, str, None], src: int = 0, safe_mode: bool = False
-) -> Union[torch.Tensor, float, str]:
+    tensor: torch.Tensor | float | str | Path | None, src: int = 0, safe_mode: bool = False
+) -> torch.Tensor | float | str | Path:
     """Helper method to perform broadcast operation.
 
     Args:
-        tensor: tensor or number or str to broadcast to participating processes.
+        tensor: tensor, number, str or pathlib.Path to broadcast to participating processes.
             Make sure to respect data type of torch tensor input for all processes, otherwise execution will crash.
             Can use None for non-source data with ``safe_mode=True``.
         src: source rank. Default, 0.
-        safe_mode: if True, non source input data can be ``None`` or anything (will be discarded), otherwise data
-            type of the input ``tensor`` should be respected for all processes. Please, keep in mind, this mode is
-            working only for dense tensors as source input if a tensor is provided. There are additional collective
-            ops are performed before doing the broadcast and, thus, can be slower than without using this mode.
-            Default, False.
+        safe_mode: if True, non source input data can be ``None`` or anything (will be discarded), otherwise data type
+            of the input ``tensor`` should be respected for all processes. Please, keep in mind, this mode is working
+            only for dense tensors as source input if a tensor is provided. It also leads to some additional
+            collectives before the broadcast, making it slower than without using this mode. Default, False.
 
     Returns:
-        torch.Tensor or string or number
+        torch.Tensor, string, pathlib.Path or number
 
     Examples:
         .. code-block:: python
@@ -422,12 +493,39 @@ def broadcast(
 
 
 def barrier() -> None:
-    """Helper method to synchronize all processes.
-    """
+    """Helper method to synchronize all processes."""
     if _need_to_sync and isinstance(_model, _SerialModel):
         sync(temporary=True)
 
     _model.barrier()
+
+
+def new_group(ranks: list[int], **kwargs: Any) -> Any:
+    """Helper method to make group for each backend from ranks.
+
+    Args:
+        ranks: subset of ranks to be grouped.
+        kwargs: acceptable kwargs according to provided backend:
+
+            - | "nccl" or "gloo" : ``backend (=None)``, ``pg_options (=None)``.
+
+    Examples:
+        Launch single node multi-GPU training with ``torchrun`` utility.
+
+        .. code-block:: python
+
+            import ignite.distributed as idist
+
+            ranks = [0, 1]
+            group = idist.new_group(ranks)
+
+    .. versionadded:: 0.4.11
+    """
+
+    if _need_to_sync and isinstance(_model, _SerialModel):
+        sync(temporary=True)
+
+    return _model.new_group(ranks, **kwargs)
 
 
 def set_local_rank(index: int) -> None:
@@ -484,12 +582,11 @@ def initialize(backend: str, **kwargs: Any) -> None:
             - | "horovod" : comm(=None), more info: `hvd_init`_.
 
     Examples:
-        Launch single node multi-GPU training with ``torch.distributed.launch`` utility.
+        Launch single node multi-GPU training with ``torchrun`` utility.
 
         .. code-block:: python
 
-            # >>> python -m torch.distributed.launch --nproc_per_node=4 main.py
-
+            # >>> torchrun --nproc_per_node=4 main.py
             # main.py
 
             import ignite.distributed as idist
@@ -543,8 +640,7 @@ def finalize() -> None:
 
 
 def show_config() -> None:
-    """Helper method to display distributed configuration via ``logging``.
-    """
+    """Helper method to display distributed configuration via ``logging``."""
 
     # setup parallel logger
     logger = setup_logger(__name__)
@@ -586,7 +682,7 @@ def one_rank_only(rank: int = 0, with_barrier: bool = False) -> Callable:
 
     def _one_rank_only(func: Callable) -> Callable:
         @wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Optional[Any]:
+        def wrapper(*args: Any, **kwargs: Any) -> Any | None:
             ret = None
             if get_rank() == rank:
                 ret = func(*args, **kwargs)
@@ -597,3 +693,53 @@ def one_rank_only(rank: int = 0, with_barrier: bool = False) -> Callable:
         return wrapper
 
     return _one_rank_only
+
+
+@contextmanager
+def one_rank_first(rank: int = 0, local: bool = False) -> Any:
+    """Context manager that ensures a specific rank runs first before others in a distributed
+    environment.
+
+    Args:
+        rank: rank of the process that should execute the code
+            block inside the context manager first. Default, 0.
+        local: flag to specify local rank or global rank.
+            If True ``rank`` argument will define a local rank to run first.
+            Default, False
+
+    Examples:
+        .. code-block:: python
+
+            def download_dataset():
+                ...
+
+            with idist.one_rank_first():
+                ds = download_dataset()
+
+            dp = ds[0]
+
+    .. versionadded:: 0.4.13
+    """
+
+    current_rank = get_local_rank() if local else get_rank()
+    size = get_nproc_per_node() if local else get_world_size()
+
+    if rank >= size or rank < 0:
+        raise ValueError(f"rank should be between 0 and {size - 1}, but given {rank}")
+
+    if current_rank != rank:
+        barrier()
+
+    yield
+
+    if current_rank == rank:
+        barrier()
+
+
+def _rank_not_in_group(group: Any | list[int] | None) -> bool:
+    """Check if the current process's rank is not in a given group."""
+    if group is None:
+        return False
+    if isinstance(group, list) and all(isinstance(item, int) for item in group):
+        group = new_group(group)
+    return _model._rank_not_in_group(group)

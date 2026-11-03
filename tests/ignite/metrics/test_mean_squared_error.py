@@ -17,66 +17,61 @@ def test_zero_sample():
         mse.compute()
 
 
-def test_compute():
+@pytest.fixture(params=[item for item in range(4)])
+def test_case(request):
+    return [
+        (torch.randint(0, 10, size=(100, 1)), torch.randint(0, 10, size=(100, 1)), 1),
+        (torch.randint(-20, 20, size=(100, 5)), torch.randint(-20, 20, size=(100, 5)), 1),
+        # updated batches
+        (torch.randint(0, 10, size=(100, 1)), torch.randint(0, 10, size=(100, 1)), 16),
+        (torch.randint(-20, 20, size=(100, 5)), torch.randint(-20, 20, size=(100, 5)), 16),
+    ][request.param]
 
-    mse = MeanSquaredError()
 
-    def _test(y_pred, y, batch_size):
-        mse.reset()
-        if batch_size > 1:
-            n_iters = y.shape[0] // batch_size + 1
-            for i in range(n_iters):
-                idx = i * batch_size
-                mse.update((y_pred[idx : idx + batch_size], y[idx : idx + batch_size]))
-        else:
-            mse.update((y_pred, y))
+@pytest.mark.parametrize("n_times", range(5))
+def test_compute(n_times, available_device, test_case):
+    mse = MeanSquaredError(device=available_device)
+    assert mse._device == torch.device(available_device)
 
-        np_y = y.numpy()
-        np_y_pred = y_pred.numpy()
+    y_pred, y, batch_size = test_case
 
-        np_res = np.power((np_y - np_y_pred), 2.0).sum() / np_y.shape[0]
+    mse.reset()
+    if batch_size > 1:
+        n_iters = y.shape[0] // batch_size + 1
+        for i in range(n_iters):
+            idx = i * batch_size
+            mse.update((y_pred[idx : idx + batch_size], y[idx : idx + batch_size]))
+    else:
+        mse.update((y_pred, y))
 
-        assert isinstance(mse.compute(), float)
-        assert mse.compute() == np_res
+    np_y = y.numpy()
+    np_y_pred = y_pred.numpy()
 
-    def get_test_cases():
+    np_res = np.power((np_y - np_y_pred), 2.0).sum() / np_y.shape[0]
 
-        test_cases = [
-            (torch.randint(0, 10, size=(100, 1)), torch.randint(0, 10, size=(100, 1)), 1),
-            (torch.randint(-20, 20, size=(100, 5)), torch.randint(-20, 20, size=(100, 5)), 1),
-            # updated batches
-            (torch.randint(0, 10, size=(100, 1)), torch.randint(0, 10, size=(100, 1)), 16),
-            (torch.randint(-20, 20, size=(100, 5)), torch.randint(-20, 20, size=(100, 5)), 16),
-        ]
-
-        return test_cases
-
-    for _ in range(5):
-        # check multiple random inputs as random exact occurencies are rare
-        test_cases = get_test_cases()
-        for y_pred, y, batch_size in test_cases:
-            _test(y_pred, y, batch_size)
+    assert isinstance(mse.compute(), float)
+    assert mse.compute() == np_res
 
 
 def _test_distrib_integration(device, tol=1e-6):
-
     from ignite.engine import Engine
 
     rank = idist.get_rank()
-    n_iters = 100
-    s = 10
-    offset = n_iters * s
-
-    y_true = torch.arange(0, offset * idist.get_world_size(), dtype=torch.float).to(device)
-    y_preds = torch.ones(offset * idist.get_world_size(), dtype=torch.float).to(device)
-
-    def update(engine, i):
-        return (
-            y_preds[i * s + offset * rank : (i + 1) * s + offset * rank],
-            y_true[i * s + offset * rank : (i + 1) * s + offset * rank],
-        )
+    torch.manual_seed(12 + rank)
 
     def _test(metric_device):
+        n_iters = 100
+        batch_size = 10
+
+        y_true = torch.arange(0, n_iters * batch_size, dtype=torch.float).to(device)
+        y_preds = torch.ones(n_iters * batch_size, dtype=torch.float).to(device)
+
+        def update(engine, i):
+            return (
+                y_preds[i * batch_size : (i + 1) * batch_size],
+                y_true[i * batch_size : (i + 1) * batch_size],
+            )
+
         engine = Engine(update)
 
         m = MeanSquaredError(device=metric_device)
@@ -84,6 +79,9 @@ def _test_distrib_integration(device, tol=1e-6):
 
         data = list(range(n_iters))
         engine.run(data=data, max_epochs=1)
+
+        y_preds = idist.all_gather(y_preds)
+        y_true = idist.all_gather(y_true)
 
         assert "mse" in engine.state.metrics
         res = engine.state.metrics["mse"]
@@ -98,12 +96,10 @@ def _test_distrib_integration(device, tol=1e-6):
 
 
 def _test_distrib_accumulator_device(device):
-
     metric_devices = [torch.device("cpu")]
     if device.type != "xla":
         metric_devices.append(idist.device())
     for metric_device in metric_devices:
-
         device = torch.device(device)
         mse = MeanSquaredError(device=metric_device)
 
@@ -132,7 +128,6 @@ def test_accumulator_detached():
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
 def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
-
     device = idist.device()
     _test_distrib_integration(device)
     _test_distrib_accumulator_device(device)
@@ -141,7 +136,6 @@ def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
-
     device = idist.device()
     _test_distrib_integration(device)
     _test_distrib_accumulator_device(device)
@@ -151,7 +145,6 @@ def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
 @pytest.mark.skipif(not idist.has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_distrib_hvd(gloo_hvd_executor):
-
     device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
     nproc = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
 
@@ -163,7 +156,6 @@ def test_distrib_hvd(gloo_hvd_executor):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
-
     device = idist.device()
     _test_distrib_integration(device)
     _test_distrib_accumulator_device(device)
@@ -173,7 +165,6 @@ def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("GPU_MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_nccl_gpu(distributed_context_multi_node_nccl):
-
     device = idist.device()
     _test_distrib_integration(device)
     _test_distrib_accumulator_device(device)

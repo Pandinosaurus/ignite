@@ -1,11 +1,28 @@
+import warnings
 from copy import deepcopy
-from typing import Optional, Union
 
 import torch.nn as nn
 
 from ignite.engine import CallableEventWithFilter, Engine, Events, EventsList
+from ignite.handlers.param_scheduler import BaseParamScheduler
+from ignite.handlers.state_param_scheduler import LambdaStateScheduler
 
 __all__ = ["EMAHandler"]
+
+
+class EMAWarmUp:
+    def __init__(self, momentum_warmup: float, warmup_iters: int, momentum: float) -> None:
+        self.momentum_warmup = momentum_warmup
+        self.warmup_iters = warmup_iters
+        self.momentum = momentum
+
+    def __call__(self, event_index: int) -> float:
+        denominator = max(1, self.warmup_iters - 1)
+        curr_momentum = self.momentum_warmup + (self.momentum - self.momentum_warmup) * (event_index - 1) / denominator
+        if self.momentum >= self.momentum_warmup:
+            return min(self.momentum, curr_momentum)
+        else:
+            return max(self.momentum, curr_momentum)
 
 
 class EMAHandler:
@@ -15,31 +32,31 @@ class EMAHandler:
     .. math:: \theta_{\text{EMA}, t+1} = (1 - \lambda) \cdot \theta_{\text{EMA}, t} + \lambda \cdot \theta_{t}
 
     where :math:`\theta_{\text{EMA}, t}` and :math:`\theta_{t}` are the EMA weights and online model weights at
-    :math:`t`-th iteration, respectively; :math:`\lambda` is the update momentum. The handler allows for linearly
-    warming up the momentum in the beginning when training process is not stable. Current momentum can be retrieved
+    :math:`t`-th iteration, respectively; :math:`\lambda` is the update momentum. Current momentum can be retrieved
     from ``Engine.state.ema_momentum``.
 
     Args:
           model: the online model for which an EMA model will be computed. If ``model`` is ``DataParallel`` or
               ``DistributedDataParallel``, the EMA smoothing will be applied to ``model.module`` .
           momentum: the update momentum after warmup phase, should be float in range :math:`\left(0, 1 \right)`.
-          momentum_warmup: the initial update momentum during warmup phase, the value should be smaller than
-              ``momentum``. Momentum will linearly increase from this value to ``momentum`` in ``warmup_iters``
-              iterations. If ``None``, no warmup will be performed.
-          warmup_iters: iterations of warmup. If ``None``, no warmup will be performed.
+          momentum_warmup: the initial update momentum during warmup phase.
+          warmup_iters: iterations of warmup.
+          handle_buffers: how to handle model buffers during training. There are three options: 1. "copy" means
+              copying the buffers of the online model; 2. "update" means applying EMA to the buffers of the online
+              model; 3. "ema_train" means set the EMA model to ``train`` mode and skip copying or updating the buffers.
 
     Attributes:
           ema_model: the exponential moving averaged model.
           model: the online model that is tracked by EMAHandler. It is ``model.module`` if ``model`` in
               the initialization method is an instance of ``DistributedDataParallel``.
-          momentum: the update momentum after warmup phase.
-          momentum_warmup: the initial update momentum.
-          warmup_iters: number of warmup iterations.
+          momentum: the update momentum.
+          handle_buffers: how to handle model buffers during training.
 
     Note:
-          The EMA model is already in ``eval`` mode. If model in the arguments is an ``nn.Module`` or
-          ``DistributedDataParallel``, the EMA model is an ``nn.Module`` and it is on the same device as the online
-          model. If the model is an ``nn.DataParallel``, then the EMA model is an ``nn.DataParallel``.
+          The EMA model is already in ``eval`` mode if ``handle_buffers`` is "copy" or "update". If model in the
+          arguments is an ``nn.Module`` or ``DistributedDataParallel``, the EMA model is an ``nn.Module`` and it is on
+          the same device as the online model. If the model is an ``nn.DataParallel``, then the EMA model is an
+          ``nn.DataParallel``.
 
 
     Note:
@@ -56,8 +73,7 @@ class EMAHandler:
               device = torch.device("cuda:0")
               model = nn.Linear(2, 1).to(device)
               # update the ema every 5 iterations
-              ema_handler = EMAHandler(
-                  model, momentum=0.0002, momentum_warmup=0.0001, warmup_iters=10000)
+              ema_handler = EMAHandler(model, momentum=0.0002)
               # get the ema model, which is an instance of nn.Module
               ema_model = ema_handler.ema_model
               trainer = Engine(train_step_fn)
@@ -88,6 +104,19 @@ class EMAHandler:
                   engine.run(val_data_loader)
 
               trainer.run(...)
+
+          The following example shows how to perform warm-up to the EMA momentum:
+
+          .. code-block:: python
+
+              device = torch.device("cuda:0")
+              model = nn.Linear(2, 1).to(device)
+              # linearly change the EMA momentum from 0.2 to 0.002 in the first 100 iterations,
+              # then keep a constant EMA momentum of 0.002 afterwards
+              ema_handler = EMAHandler(model, momentum=0.002, momentum_warmup=0.2, warmup_iters=100)
+              engine = Engine(step_fn)
+              ema_handler.attach(engine, name="ema_momentum")
+              engine.run(...)
 
           The following example shows how to attach two handlers to the same trainer:
 
@@ -122,28 +151,22 @@ class EMAHandler:
         self,
         model: nn.Module,
         momentum: float = 0.0002,
-        momentum_warmup: Optional[float] = None,
-        warmup_iters: Optional[int] = None,
+        momentum_warmup: float | None = None,
+        warmup_iters: int | None = None,
+        handle_buffers: str = "copy",
     ) -> None:
-        if momentum_warmup is not None and not 0 < momentum_warmup < 1:
-            raise ValueError(f"Invalid momentum_warmup: {momentum_warmup}")
         if not 0 < momentum < 1:
             raise ValueError(f"Invalid momentum: {momentum}")
-        if momentum_warmup is not None and not momentum_warmup <= momentum:
-            raise ValueError(
-                f"momentum_warmup should be less than or equal to momentum, but got "
-                f"momentum_warmup: {momentum_warmup} and momentum: {momentum}"
-            )
-        if warmup_iters is not None and not (isinstance(warmup_iters, int) and warmup_iters > 0):
-            raise ValueError(f"Invalid warmup_iters: {warmup_iters}")
+        self.momentum = momentum
+        self._momentum_lambda_obj: EMAWarmUp | None = None
+        if momentum_warmup is not None and warmup_iters is not None:
+            self.momentum_scheduler: BaseParamScheduler | None = None
+            self._momentum_lambda_obj = EMAWarmUp(momentum_warmup, warmup_iters, momentum)
+
         if not isinstance(model, nn.Module):
             raise ValueError(
-                f"model should be an instance of nn.Module or its subclasses, but got"
-                f"model: {model.__class__.__name__}"
+                f"model should be an instance of nn.Module or its subclasses, but gotmodel: {model.__class__.__name__}"
             )
-        self.momentum_warmup = momentum_warmup
-        self.momentum = momentum
-        self.warmup_iters = warmup_iters
 
         if isinstance(model, nn.parallel.DistributedDataParallel):
             model = model.module
@@ -152,63 +175,81 @@ class EMAHandler:
         self.ema_model = deepcopy(self.model)
         for param in self.ema_model.parameters():
             param.detach_()
-        self.ema_model.eval()
 
-    def _get_momentum(self, curr_iter: int) -> float:
-        """Get current momentum, `curr_iter` should be 1-based. When `curr_iter = 1`, `momentum =
-        self.momentum_warmup`; when `curr_iter >= self.warmup_iters`, `momentum = self.momentum`"""
+        if handle_buffers not in ("copy", "update", "ema_train"):
+            raise ValueError(
+                f"handle_buffers can only be one of 'copy', 'update', 'ema_train', but got {handle_buffers}"
+            )
 
-        # TODO: use ignite's parameter scheduling, see also GitHub issue #2090
-        if curr_iter < 1:
-            raise ValueError(f"curr_iter should be at least 1, but got {curr_iter}.")
-
-        # no warmup
-        if self.momentum_warmup is None or self.warmup_iters is None:
-            return self.momentum
-
-        denominator = max(1, self.warmup_iters - 1)
-        momentum = self.momentum_warmup + (self.momentum - self.momentum_warmup) * (curr_iter - 1) / denominator
-        return min(self.momentum, momentum)
+        self.handle_buffers = handle_buffers
+        if self.handle_buffers == "ema_train":
+            self.ema_model.train()
+        else:
+            self.ema_model.eval()
 
     def _update_ema_model(self, engine: Engine, name: str) -> None:
         """Update weights of ema model"""
         momentum = getattr(engine.state, name)
         for ema_p, model_p in zip(self.ema_model.parameters(), self.model.parameters()):
             ema_p.mul_(1.0 - momentum).add_(model_p.data, alpha=momentum)
-        # assign the buffers
-        for ema_b, model_b in zip(self.ema_model.buffers(), self.model.buffers()):
-            ema_b.data = model_b.data
 
-    def _update_ema_momentum(self, engine: Engine, name: str) -> None:
-        """Update momentum in engine.state"""
-        curr_iter = engine.state.iteration
-        momentum = self._get_momentum(curr_iter)
-        setattr(engine.state, name, momentum)
+        if self.handle_buffers == "update":
+            for ema_b, model_b in zip(self.ema_model.buffers(), self.model.buffers()):
+                try:
+                    ema_b.mul_(1.0 - momentum).add_(model_b.data, alpha=momentum)
+                except RuntimeError:
+                    # Handle the case where ema_b is torch.int64, torch.int32 etc.,
+                    # where a runtime error will be thrown when performing the in-place operations with floats.
+                    # In this case, just copy the data
+                    ema_b.data = model_b.data
+        elif self.handle_buffers == "copy":
+            # assign the buffers
+            for ema_b, model_b in zip(self.ema_model.buffers(), self.model.buffers()):
+                ema_b.data = model_b.data
+        else:
+            pass
 
     def attach(
         self,
         engine: Engine,
         name: str = "ema_momentum",
-        event: Union[str, Events, CallableEventWithFilter, EventsList] = Events.ITERATION_COMPLETED,
+        warn_if_exists: bool = True,
+        event: str | Events | CallableEventWithFilter | EventsList = Events.ITERATION_COMPLETED,
     ) -> None:
         """Attach the handler to engine. After the handler is attached, the ``Engine.state`` will add an new attribute
-        with name ``name``. Then, current momentum can be retrieved by from ``Engine.state`` when the engine runs.
+        with name ``name`` if the attribute does not exist. Then, the current momentum can be retrieved from
+        ``Engine.state`` when the engine runs.
+
+
+        Note:
+            There are two cases where a momentum with name ``name`` already exists: 1. the engine has loaded its
+            state dict after resuming. In this case, there is no need to initialize the momentum again, and users
+            can set ``warn_if_exists`` to False to suppress the warning message; 2. another handler has created
+            a state attribute with the same name. In this case, users should choose another name for the ema momentum.
+
 
         Args:
             engine: trainer to which the handler will be attached.
             name: attribute name for retrieving EMA momentum from ``Engine.state``. It should be a unique name since a
                 trainer can have multiple EMA handlers.
+            warn_if_exists: if True, a warning will be thrown if the momentum with name ``name`` already exists.
             event: event when the EMA momentum and EMA model are updated.
 
         """
         if hasattr(engine.state, name):
-            raise ValueError(
-                f"Attribute: '{name}' is already in Engine.state. Thus it might be "
-                f"overridden by other EMA handlers. Please select another name."
-            )
+            if warn_if_exists:
+                warnings.warn(
+                    f"Attribute '{name}' already exists in Engine.state. It might because 1. the engine has loaded its "
+                    f"state dict or 2. {name} is already created by other handlers. Turn off this warning by setting"
+                    f"warn_if_exists to False.",
+                    category=UserWarning,
+                )
+        else:
+            setattr(engine.state, name, self.momentum)
 
-        setattr(engine.state, name, 0.0)
+        if self._momentum_lambda_obj is not None:
+            self.momentum_scheduler = LambdaStateScheduler(self._momentum_lambda_obj, param_name=name)
 
-        # first update momentum, then update ema model
-        engine.add_event_handler(event, self._update_ema_momentum, name)
+            # first update the momentum and then update the EMA model
+            self.momentum_scheduler.attach(engine, event)
         engine.add_event_handler(event, self._update_ema_model, name)

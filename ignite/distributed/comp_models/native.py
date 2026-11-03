@@ -1,13 +1,16 @@
+from __future__ import annotations
+
 import os
 import re
 import subprocess
 import warnings
-from distutils.version import LooseVersion
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union, cast
+from collections.abc import Callable, Mapping
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from packaging.version import Version
 
 from ignite.distributed.comp_models.base import ComputationModel
 
@@ -15,7 +18,6 @@ has_native_dist_support = dist.is_available()
 
 
 if has_native_dist_support:
-
     NCCL = dist.Backend.NCCL
     GLOO = dist.Backend.GLOO
     MPI = dist.Backend.MPI
@@ -41,7 +43,7 @@ if has_native_dist_support:
         available_backends = tuple(name for name in [NCCL, GLOO, MPI] if getattr(dist, f"is_{name}_available")())
 
         @staticmethod
-        def create_from_context() -> Optional["_NativeDistModel"]:
+        def create_from_context() -> _NativeDistModel | None:
             if not (dist.is_available() and dist.is_initialized()):
                 return None
             return _NativeDistModel()
@@ -49,11 +51,11 @@ if has_native_dist_support:
         @staticmethod
         def create_from_backend(
             backend: str,
-            init_method: Optional[str] = None,
-            world_size: Optional[int] = None,
-            rank: Optional[int] = None,
+            init_method: str | None = None,
+            world_size: int | None = None,
+            rank: int | None = None,
             **kwargs: Any,
-        ) -> "_NativeDistModel":
+        ) -> _NativeDistModel:
             if backend not in _NativeDistModel.available_backends:
                 raise ValueError(f"Backend should be one of '{_NativeDistModel.available_backends}'")
 
@@ -75,21 +77,20 @@ if has_native_dist_support:
 
         def __init__(
             self,
-            backend: Optional[str] = None,
-            timeout: Optional[int] = None,
-            init_method: Optional[str] = None,
-            world_size: Optional[int] = None,
-            rank: Optional[int] = None,
+            backend: str | None = None,
+            timeout: int | None = None,
+            init_method: str | None = None,
+            world_size: int | None = None,
+            rank: int | None = None,
             **kwargs: Any,
         ) -> None:
-            """This is a private method. Please, use `create_from_backend` or `create_from_context`
-            """
-            super(_NativeDistModel, self).__init__()
-            self._env_backup = None  # type: Optional[Dict[str, str]]
-            self._local_rank = None  # type: Optional[int]
-            self._master_port = None  # type: Optional[int]
-            self._master_addr = None  # type: Optional[str]
-            self._init_method = None  # type: Optional[str]
+            """This is a private method. Please, use `create_from_backend` or `create_from_context`"""
+            super().__init__()
+            self._env_backup: dict[str, str] | None = None
+            self._local_rank: int | None = None
+            self._master_port: int | None = None
+            self._master_addr: str | None = None
+            self._init_method: str | None = None
             if backend is not None:
                 self._create_from_backend(
                     backend, timeout=timeout, init_method=init_method, world_size=world_size, rank=rank, **kwargs
@@ -100,18 +101,25 @@ if has_native_dist_support:
         def _create_from_backend(
             self,
             backend: str,
-            timeout: Optional[int] = None,
-            init_method: Optional[str] = None,
-            world_size: Optional[int] = None,
-            rank: Optional[int] = None,
+            timeout: int | None = None,
+            init_method: str | None = None,
+            world_size: int | None = None,
+            rank: int | None = None,
             **kwargs: Any,
         ) -> None:
+            if init_method is not None and init_method.startswith("tcp://"):
+                raise ValueError(
+                    f"TCP initialization via init_method='{init_method}' will hang. "
+                    "To fix this, please configure MASTER_ADDR and MASTER_PORT in the environment and "
+                    "use 'env://' (or omit init_method)."
+                )
+
             if backend == dist.Backend.NCCL and not torch.cuda.is_available():
                 raise RuntimeError("Nccl backend is required but no cuda capable devices")
             self._backend = backend
             self.setup_env_vars(rank, world_size)
 
-            init_pg_kwargs = {}
+            init_pg_kwargs: dict[str, Any] = {}
             if timeout is not None:
                 init_pg_kwargs["timeout"] = timeout
 
@@ -134,7 +142,7 @@ if has_native_dist_support:
             # [W ProcessGroupNCCL.cpp:1569] Rank 0 using best-guess GPU 0 to perform barrier as devices used by
             # this process are currently unknown. This can potentially cause a hang if this rank to GPU mapping
             # is incorrect.Specify device_ids in barrier() to force use of a particular device.
-            if backend == dist.Backend.NCCL and LooseVersion(torch.__version__) >= LooseVersion("1.8.0"):
+            if backend == dist.Backend.NCCL and Version(torch.__version__) >= Version("1.8.0"):
                 device_ids = [torch.cuda.current_device()]
                 dist.barrier(device_ids=device_ids)
             else:
@@ -153,11 +161,17 @@ if has_native_dist_support:
             # Create new cpu group to get nproc_per_node such we avoid using
             # badly configured NCCL
             gloo_group = dist.new_group(backend="gloo")
+            if gloo_group == dist.GroupMember.NON_GROUP_MEMBER:
+                raise RuntimeError(
+                    "Internal error. Current process is not in the temporary gloo process group. "
+                    "Please file an issue: https://github.com/pytorch/ignite/issues"
+                )
             tensor = torch.tensor([local_rank + 1]).to("cpu")
             dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=gloo_group)
+            dist.destroy_process_group(gloo_group)
             return int(tensor.item())
 
-        def _get_all_hostnames(self) -> List[Tuple[str, ...]]:
+        def _get_all_hostnames(self) -> list[tuple[str, ...]]:
             import socket
 
             device = "cpu"
@@ -173,13 +187,13 @@ if has_native_dist_support:
             return [tuple(t.cpu().tolist()) for t in out_t_names]
 
         @staticmethod
-        def _compute_node_and_local_ranks(rank: int, hostnames: List[Tuple[str, ...]]) -> Tuple[int, int]:
+        def _compute_node_and_local_ranks(rank: int, hostnames: list[tuple[str, ...]]) -> tuple[int, int]:
             from collections import Counter
 
-            c = Counter(hostnames)  # type: Counter
-            sizes = torch.tensor([0,] + list(c.values()))
+            c: Counter = Counter(hostnames)
+            sizes = torch.tensor([0] + list(c.values()))
             cumsum_sizes = torch.cumsum(sizes, dim=0)
-            node_rank = (rank // cumsum_sizes[1:]).clamp(0, 1).sum().item()
+            node_rank = cast(int, (rank // cumsum_sizes[1:]).clamp(0, 1).sum().item())
             local_rank = rank - cumsum_sizes[node_rank].item()
             return int(local_rank), node_rank
 
@@ -196,7 +210,6 @@ if has_native_dist_support:
             return local_rank
 
         def _identify_local_rank(self) -> None:
-
             if "SLURM_JOB_ID" in os.environ:
                 os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
 
@@ -215,8 +228,7 @@ if has_native_dist_support:
                 # use socket gethostname heuristic to determine number of nodes => local rank
                 self._local_rank = self._compute_local_rank_via_hostname()
 
-        def setup_env_vars(self, rank: Optional[int] = None, world_size: Optional[int] = None) -> None:
-
+        def setup_env_vars(self, rank: int | None = None, world_size: int | None = None) -> None:
             self._env_backup = os.environ.copy()
 
             if "SLURM_JOB_ID" in os.environ:
@@ -256,7 +268,7 @@ if has_native_dist_support:
                 if k not in os.environ:
                     raise RuntimeError(f"SLURM distributed configuration is missing '{k}' in env variables")
 
-            ddp_vars = _setup_ddp_vars_from_slurm_env(cast(Dict, os.environ))
+            ddp_vars = _setup_ddp_vars_from_slurm_env(cast(dict, os.environ))
 
             # define DDP env vars required by PTH:
             for key, value in ddp_vars.items():
@@ -310,13 +322,13 @@ if has_native_dist_support:
             local_rank: int,
             backend: str,
             fn: Callable,
-            args: Tuple,
+            args: tuple,
             kw_dict: Mapping,
             world_size: int,
             nprocs_per_node: int,
             node_rank: int,
-            master_addr: Optional[str],
-            master_port: Optional[str],
+            master_addr: str | None,
+            master_port: str | None,
             init_method: str,
             kw: Any,
         ) -> None:
@@ -329,8 +341,8 @@ if has_native_dist_support:
             os.environ["RANK"] = str(rank)
             os.environ["WORLD_SIZE"] = str(world_size)
 
-            arg_world_size = world_size  # type: Optional[int]
-            arg_rank = rank  # type: Optional[int]
+            arg_world_size: int | None = world_size
+            arg_rank: int | None = rank
             if init_method == "env://":
                 os.environ["MASTER_ADDR"] = str(master_addr)
                 os.environ["MASTER_PORT"] = str(master_port)
@@ -348,17 +360,18 @@ if has_native_dist_support:
             os.environ.update(copy_env_vars)
 
         @staticmethod
-        def spawn(  # type: ignore[override]
+        # pyrefly: ignore [bad-override]
+        def spawn(
             fn: Callable,
-            args: Tuple,
-            kwargs_dict: Optional[Mapping] = None,
+            args: tuple,
+            kwargs_dict: Mapping | None = None,
             nproc_per_node: int = 1,
             nnodes: int = 1,
             node_rank: int = 0,
-            master_addr: Optional[str] = None,
-            master_port: Optional[int] = None,
+            master_addr: str | None = None,
+            master_port: int | None = None,
             backend: str = "nccl",
-            init_method: Optional[str] = None,
+            init_method: str | None = None,
             **kwargs: Any,
         ) -> None:
             world_size = nnodes * nproc_per_node
@@ -370,7 +383,7 @@ if has_native_dist_support:
 
             start_processes = mp.spawn
             # start_method and start_processes in pytorch >= 1.5
-            if LooseVersion(torch.__version__) >= LooseVersion("1.5.0"):
+            if Version(torch.__version__) >= Version("1.5.0"):
                 import builtins
 
                 if "__IPYTHON__" in builtins.__dict__:
@@ -380,11 +393,16 @@ if has_native_dist_support:
                     default_start_method = "spawn"
                 spawn_kwargs["start_method"] = kwargs.get("start_method", default_start_method)
                 start_processes = mp.start_processes
-
             if init_method in [None, "env://"]:
                 init_method = "env://"
-                master_addr = "127.0.0.1"
-                master_port = 2222
+                if master_port is None:
+                    master_port = int(os.getenv("MASTER_PORT", 2222))
+                if master_addr is None:
+                    master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
+            elif master_addr is not None:
+                raise ValueError("master_addr should be None if init_method is provided other then 'env://'")
+            elif master_port is not None:
+                raise ValueError("master_port should be None if init_method is provided other then 'env://'")
 
             start_processes(
                 _NativeDistModel._dist_worker_task_fn,
@@ -405,6 +423,15 @@ if has_native_dist_support:
                 **spawn_kwargs,
             )
 
+        def _setup_group(self, group: Any) -> dist.ProcessGroup:
+            if isinstance(group, list) and all(isinstance(item, int) for item in group):
+                group = self._do_new_group(group)
+            if not (isinstance(group, dist.ProcessGroup) or group == dist.GroupMember.NON_GROUP_MEMBER):
+                raise ValueError(
+                    f"Argument group should be list of int or ProcessGroup, got {type(group)}, group={group}"
+                )
+            return cast(dist.ProcessGroup, group)
+
         _reduce_op_map = {
             "SUM": dist.ReduceOp.SUM,
             "PRODUCT": dist.ReduceOp.PRODUCT,
@@ -414,19 +441,63 @@ if has_native_dist_support:
             "OR": dist.ReduceOp.BOR,
         }
 
-        def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM") -> torch.Tensor:
+        def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM", group: Any | None = None) -> torch.Tensor:
             if op not in self._reduce_op_map:
                 raise ValueError(f"Unsupported reduction operation: '{op}'")
+            if group is not None:
+                group = self._setup_group(group)
             reduce_op = self._reduce_op_map[op]
-            dist.all_reduce(tensor, reduce_op)
+            # We do if/else here for compatibility with older pytorch versions
+            if group is not None:
+                dist.all_reduce(tensor, reduce_op, group=group)
+            else:
+                dist.all_reduce(tensor, reduce_op)
             return tensor
 
-        def _do_all_gather(self, tensor: torch.Tensor) -> torch.Tensor:
+        def _do_all_gather(self, tensor: torch.Tensor, group: Any | None = None) -> torch.Tensor:
+            if group is not None:
+                group = self._setup_group(group)
+            if self._rank_not_in_group(group):
+                return tensor
+            if group is None:
+                group_size = self.get_world_size()
+            else:
+                group_size = group.size()
             if tensor.ndimension() == 0:
                 tensor = tensor.unsqueeze(0)
-            output = [torch.zeros_like(tensor) for _ in range(self.get_world_size())]
-            dist.all_gather(output, tensor)
+            output = [torch.zeros_like(tensor) for _ in range(group_size)]
+            # We do if/else here for compatibility with older pytorch versions
+            if group is not None:
+                dist.all_gather(output, tensor, group=group)
+            else:
+                dist.all_gather(output, tensor)
             return torch.cat(output, dim=0)
+
+        def _do_all_gather_object(self, tensor: Any, group: Any | None = None) -> list[Any]:
+            if Version(torch.__version__) < Version("1.7.0"):
+                raise RuntimeError(
+                    "Current torch version does not implement dist.all_gather_object. "
+                    "Required version should be >=1.7.0"
+                )
+            if group is not None:
+                group = self._setup_group(group)
+            if self._rank_not_in_group(group):
+                return tensor
+            if group is None:
+                group_size = self.get_world_size()
+            else:
+                group_size = group.size()
+            output = [None for _ in range(group_size)]
+            # We do if/else here for compatibility with older pytorch versions
+            if group is not None:
+                dist.all_gather_object(output, tensor, group=group)
+            else:
+                dist.all_gather_object(output, tensor)
+
+            return output
+
+        def _do_new_group(self, ranks: list[int], **kwargs: Any) -> Any:
+            return dist.new_group(ranks=ranks, **kwargs)
 
         def _do_broadcast(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
             dist.broadcast(tensor, src=src)
@@ -435,7 +506,10 @@ if has_native_dist_support:
         def barrier(self) -> None:
             dist.barrier()
 
-    def _expand_hostlist(nodelist: str) -> List[str]:
+        def _rank_not_in_group(self, group: Any | None) -> bool:
+            return dist._rank_not_in_group(group)
+
+    def _expand_hostlist(nodelist: str) -> list[str]:
         """Expand a compressed hostlist string and returns all hosts listed.
 
         Source : https://github.com/LLNL/py-hostlist/blob/master/hostlist/hostlist.py
@@ -456,7 +530,6 @@ if has_native_dist_support:
         nodelist = nodelist.replace(" ", "")
 
         for node in re.findall(nodelist_match, nodelist):
-
             node_match = r"(.+)\[((,?[0-9]+-?,?-?){0,})\](.*)?"
 
             match = re.search(node_match, node)
@@ -502,9 +575,8 @@ if has_native_dist_support:
 
         return result_hostlist
 
-    def _setup_ddp_vars_from_slurm_env(environ: Dict[str, str]) -> Dict[str, Union[str, int]]:
-        """Method to setup DDP env vars required by PyTorch from SLURM env
-        """
+    def _setup_ddp_vars_from_slurm_env(environ: dict[str, str]) -> dict[str, str | int]:
+        """Method to setup DDP env vars required by PyTorch from SLURM env"""
         # 1) Tools like enroot can have hooks to translate slurm env vars to RANK, LOCAL_RANK, WORLD_SIZE etc
         # See https://github.com/NVIDIA/enroot/blob/v3.1.0/conf/hooks/extra/50-slurm-pytorch.sh
         # 2) User can use torch.distributed.launch tool to schedule on N local GPUs using 1 node, 1 task by SLURM
@@ -514,7 +586,7 @@ if has_native_dist_support:
         # To cover case 2), let's check that defined RANK >= SLURM_PROCID, LOCAL_RANK >= SLURM_LOCALID,
         #   WORLD_SIZE >= SLURM_NTASKS, SLURM_JOB_NUM_NODES == 1
 
-        ddp_vars: Dict[str, Union[str, int, None]] = {
+        ddp_vars: dict[str, str | int | None] = {
             "RANK": int(environ["SLURM_PROCID"]),
             "LOCAL_RANK": int(environ["SLURM_LOCALID"]),
             "WORLD_SIZE": int(environ["SLURM_NTASKS"]),
@@ -588,4 +660,4 @@ if has_native_dist_support:
             slurm_port = slurm_port[-4:]
             ddp_vars["MASTER_PORT"] = int(slurm_port) + 15000
 
-        return cast(Dict[str, Union[str, int]], ddp_vars)
+        return cast(dict[str, str | int], ddp_vars)

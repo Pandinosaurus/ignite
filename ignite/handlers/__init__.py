@@ -1,23 +1,29 @@
-from typing import Any, Callable, Optional, Union
-
 from ignite.engine import Engine
 from ignite.engine.events import Events
 from ignite.handlers.checkpoint import Checkpoint, DiskSaver, ModelCheckpoint
+from ignite.handlers.clearml_logger import ClearMLLogger
 from ignite.handlers.early_stopping import EarlyStopping
 from ignite.handlers.ema_handler import EMAHandler
+from ignite.handlers.fbresearch_logger import FBResearchLogger
 from ignite.handlers.lr_finder import FastaiLRFinder
+from ignite.handlers.mlflow_logger import MLflowLogger
+from ignite.handlers.neptune_logger import NeptuneLogger
 from ignite.handlers.param_scheduler import (
     BaseParamScheduler,
+    BatchSizeScheduler,
     ConcatScheduler,
     CosineAnnealingScheduler,
+    create_lr_scheduler_with_warmup,
     CyclicalScheduler,
     LinearCyclicalScheduler,
     LRScheduler,
     ParamGroupScheduler,
     ParamScheduler,
     PiecewiseLinear,
-    create_lr_scheduler_with_warmup,
+    ReduceLROnPlateauScheduler,
 )
+
+from ignite.handlers.polyaxon_logger import PolyaxonLogger
 from ignite.handlers.state_param_scheduler import (
     ExpStateScheduler,
     LambdaStateScheduler,
@@ -27,10 +33,16 @@ from ignite.handlers.state_param_scheduler import (
     StepStateScheduler,
 )
 from ignite.handlers.stores import EpochOutputStore
+from ignite.handlers.tensorboard_logger import TensorboardLogger
 from ignite.handlers.terminate_on_nan import TerminateOnNan
 from ignite.handlers.time_limit import TimeLimit
 from ignite.handlers.time_profilers import BasicTimeProfiler, HandlersTimeProfiler
 from ignite.handlers.timing import Timer
+from ignite.handlers.tqdm_logger import ProgressBar
+from ignite.handlers.utils import global_step_from_engine  # noqa
+
+from ignite.handlers.visdom_logger import VisdomLogger
+from ignite.handlers.wandb_logger import WandBLogger
 
 __all__ = [
     "ModelCheckpoint",
@@ -52,34 +64,25 @@ __all__ = [
     "CyclicalScheduler",
     "create_lr_scheduler_with_warmup",
     "FastaiLRFinder",
+    "FBResearchLogger",
     "EMAHandler",
     "BasicTimeProfiler",
     "HandlersTimeProfiler",
     "BaseParamScheduler",
+    "BatchSizeScheduler",
     "StateParamScheduler",
     "LambdaStateScheduler",
     "PiecewiseLinearStateScheduler",
     "ExpStateScheduler",
     "StepStateScheduler",
     "MultiStepStateScheduler",
+    "ReduceLROnPlateauScheduler",
+    "ClearMLLogger",
+    "MLflowLogger",
+    "NeptuneLogger",
+    "PolyaxonLogger",
+    "TensorboardLogger",
+    "ProgressBar",
+    "VisdomLogger",
+    "WandBLogger",
 ]
-
-
-def global_step_from_engine(engine: Engine, custom_event_name: Optional[Events] = None) -> Callable:
-    """Helper method to setup `global_step_transform` function using another engine.
-    This can be helpful for logging trainer epoch/iteration while output handler is attached to an evaluator.
-
-    Args:
-        engine: engine which state is used to provide the global step
-        custom_event_name: registered event name. Optional argument, event name to use.
-
-    Returns:
-        global step based on provided engine
-    """
-
-    def wrapper(_: Any, event_name: Events) -> int:
-        if custom_event_name is not None:
-            event_name = custom_event_name
-        return engine.state.get_event_attrib_value(event_name)
-
-    return wrapper

@@ -1,7 +1,17 @@
-exclude: "^conda.recipe"
+exclude: "^conda.recipe|assets|docs"
+
 repos:
+  - repo: https://github.com/srstevenson/nb-clean
+    rev: 3.2.0
+    hooks:
+      - id: nb-clean
+        args:
+          - --preserve-cell-outputs
+          - --remove-empty-cells
+        types: [jupyter]
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v3.4.0
+    rev: v5.0.0
     hooks:
       - id: check-toml
       - id: check-yaml
@@ -14,21 +24,10 @@ repos:
       - id: prettier
         exclude_types: ["python", "jupyter", "shell", "gitignore"]
 
-  - repo: https://github.com/python/black
-    rev: 19.10b0
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.13
     hooks:
-      - id: black
-        language_version: python3.8
-        args: ["--config", "pyproject.toml"]
-
-  - repo: https://github.com/timothycrosley/isort
-    rev: 5.7.0
-    hooks:
-      - id: isort
-        args: ["--settings", "setup.cfg"]
-
-  - repo: https://gitlab.com/pycqa/flake8
-    rev: 3.8.4
-    hooks:
-      - id: flake8
-        args: ["--config", "setup.cfg"]
+      - id: ruff-check
+        types_or: [python, pyi]
+      - id: ruff-format
+        types_or: [python, pyi, jupyter]

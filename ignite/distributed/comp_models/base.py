@@ -1,24 +1,30 @@
+from __future__ import annotations
+
 from abc import ABCMeta, abstractmethod
+from collections.abc import Callable
 from numbers import Number
-from typing import Any, Callable, List, Optional, Union, cast
+from pathlib import Path
+from typing import Any, cast
 
 import torch
+from packaging.version import Version
+
+_torch_version_gt_112 = Version(torch.__version__) > Version("1.12.0")
 
 
 class ComputationModel(metaclass=ABCMeta):
     """Base class for distributed computation models and defines interface methods.
-
     This class is public and should be used for other custom derived distributed models.
     """
 
     # this is an additional local rank storage used when idist is setup from existing native torch dist context
-    _ext_local_rank = None  # type: Optional[int]
+    _ext_local_rank: int | None = None
 
     def __init__(self) -> None:
-        self._backend = None  # type: Optional[str]
-        self._nproc_per_node = None  # type: Optional[int]
-        self._nnodes = None  # type: Optional[int]
-        self._node = None  # type: Optional[int]
+        self._backend: str | None = None
+        self._nproc_per_node: int | None = None
+        self._nnodes: int | None = None
+        self._node: int | None = None
 
     def _setup_attrs(self) -> None:
         if self._nproc_per_node is None:
@@ -61,7 +67,7 @@ class ComputationModel(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def backend(self) -> Optional[str]:
+    def backend(self) -> str | None:
         pass
 
     @abstractmethod
@@ -70,12 +76,12 @@ class ComputationModel(metaclass=ABCMeta):
 
     @staticmethod
     @abstractmethod
-    def create_from_context() -> Optional["ComputationModel"]:
+    def create_from_context() -> ComputationModel | None:
         pass
 
     @staticmethod
     @abstractmethod
-    def create_from_backend(backend: str, **kwargs: Any) -> "ComputationModel":
+    def create_from_backend(backend: str, **kwargs: Any) -> ComputationModel:
         pass
 
     @staticmethod
@@ -83,7 +89,7 @@ class ComputationModel(metaclass=ABCMeta):
     def spawn(*args: Any, **kwargs: Any) -> None:
         pass
 
-    _collective_op_dtype = None  # type: Any
+    _collective_op_dtype: Any = None
 
     @staticmethod
     def _encode_str(x: str, device: torch.device, size: int) -> torch.Tensor:
@@ -95,12 +101,13 @@ class ComputationModel(metaclass=ABCMeta):
         return padded_x.unsqueeze(0)
 
     def _get_max_length(self, x: str, device: torch.device) -> int:
-        size = torch.tensor([len(x),], device=device)
-        size = self._do_all_reduce(size, "MAX")
+        # _encode_str pads the UTF-8 bytes of x, so measure bytes rather than characters
+        size = torch.tensor([len(bytearray(x, "utf-8"))], device=device)
+        size = self._do_all_reduce(size, op="MAX")
         return cast(int, size.item())
 
     @staticmethod
-    def _encode_input_data(x: Union[torch.Tensor, float, str, None], is_src: bool) -> List[int]:
+    def _encode_input_data(x: torch.Tensor | float | str | Path | None, is_src: bool) -> list[int]:
         encoded_msg = [-1] * 512
         if not is_src:
             # Discard input type if not source
@@ -115,10 +122,14 @@ class ComputationModel(metaclass=ABCMeta):
             encoded_msg[0] = 1
         elif isinstance(x, str):
             encoded_msg[0] = 2
+        elif isinstance(x, Path):
+            # Keep a distinct tag so non-source ranks in safe mode can reconstruct
+            # Path placeholders and return Path values rather than strings.
+            encoded_msg[0] = 3
         return encoded_msg
 
     @staticmethod
-    def _decode_as_placeholder(encoded_msg: List[int], device: torch.device) -> Union[torch.Tensor, float, str]:
+    def _decode_as_placeholder(encoded_msg: list[int], device: torch.device) -> torch.Tensor | float | str | Path:
         if encoded_msg[0] == 0:
             len_shape = encoded_msg[1]
             le = 2 + len_shape
@@ -131,15 +142,16 @@ class ComputationModel(metaclass=ABCMeta):
             return 0.0
         elif encoded_msg[0] == 2:
             return ""
+        elif encoded_msg[0] == 3:
+            return Path("")
         else:
             raise RuntimeError(f"Internal error: unhandled dtype {encoded_msg[0]}, encoded_msg={encoded_msg}")
 
     def _setup_placeholder(
-        self, x: Union[torch.Tensor, float, str, None], device: torch.device, is_src: bool
-    ) -> Union[torch.Tensor, float, str]:
-
+        self, x: torch.Tensor | float | str | Path | None, device: torch.device, is_src: bool
+    ) -> torch.Tensor | float | str | Path:
         encoded_msg_per_rank = self._encode_input_data(x, is_src)
-        encoded_msg_all_ranks = self._do_all_reduce(torch.tensor(encoded_msg_per_rank, device=device), "MAX")
+        encoded_msg_all_ranks = self._do_all_reduce(torch.tensor(encoded_msg_per_rank, device=device), op="MAX")
 
         if is_src:
             if x is None:
@@ -150,7 +162,7 @@ class ComputationModel(metaclass=ABCMeta):
         return self._decode_as_placeholder(encoded_msg, device)
 
     @staticmethod
-    def _decode_str(xs: torch.Tensor) -> List[str]:
+    def _decode_str(xs: torch.Tensor) -> list[str]:
         # xs.shape = (n, size + 1), e.g. (world_size, size + 1)
         out = [bytearray(x[: x[-1]].tolist()).decode("utf-8") for x in xs]
         return out
@@ -183,13 +195,16 @@ class ComputationModel(metaclass=ABCMeta):
         return tensor
 
     def _collective_op(
-        self, tensor: Union[torch.Tensor, float, str], fn: Callable, *args: Any, **kwargs: Any
-    ) -> Union[torch.Tensor, float, List[float], List[str]]:
+        self, tensor: torch.Tensor | Number | str, fn: Callable, *args: Any, **kwargs: Any
+    ) -> torch.Tensor | float | list[float] | list[str]:
         tensor_to_number = tensor_to_str = False
         device = self.device()
         if isinstance(tensor, (Number, float)):
             tensor_to_number = True
-            tensor = torch.tensor(tensor, device=device, dtype=self._collective_op_dtype)
+            dtype = self._collective_op_dtype
+            if dtype is None and isinstance(tensor, float):
+                dtype = torch.double
+            tensor = torch.tensor(tensor, device=device, dtype=dtype)
         elif isinstance(tensor, str):
             tensor_to_str = True
             max_length = self._get_max_length(tensor, device)
@@ -198,30 +213,37 @@ class ComputationModel(metaclass=ABCMeta):
         tensor = self._apply_op(tensor, device, fn, *args, **kwargs)
 
         if tensor_to_number:
-            if tensor.numel() == 1:
-                return tensor.item()
-            else:
-                return tensor.tolist()
+            return tensor.tolist()
         elif tensor_to_str:
             return self._decode_str(tensor)
         return tensor
 
-    def all_reduce(self, tensor: Union[torch.Tensor, float], op: str = "sum") -> Union[torch.Tensor, float]:
+    def all_reduce(
+        self, tensor: torch.Tensor | float, op: str = "sum", group: Any | None = None
+    ) -> torch.Tensor | float:
         if not isinstance(tensor, (torch.Tensor, Number)):
             raise TypeError(f"Unhandled input type {type(tensor)}")
 
-        return cast(Union[torch.Tensor, float], self._collective_op(tensor, self._do_all_reduce, op))
+        return cast(torch.Tensor | float, self._collective_op(tensor, self._do_all_reduce, op, group=group))
 
-    def all_gather(self, tensor: Union[torch.Tensor, float, str]) -> Union[torch.Tensor, float, List[float], List[str]]:
+    def all_gather(
+        self, tensor: torch.Tensor | float | str | Any, group: Any | None = None
+    ) -> torch.Tensor | float | list[float] | list[str] | list[Any]:
         if not isinstance(tensor, (torch.Tensor, Number, str)):
-            raise TypeError(f"Unhandled input type {type(tensor)}")
+            return self._do_all_gather_object(tensor, group=group)
 
-        return self._collective_op(tensor, self._do_all_gather)
+        return self._collective_op(tensor, self._do_all_gather, group=group)
+
+    def new_group(self, ranks: list[int], **kwargs: Any) -> Any:
+        if isinstance(ranks, list) and all(isinstance(item, int) for item in ranks):
+            return self._do_new_group(ranks, **kwargs)
+        else:
+            raise ValueError("Argument ranks should be list of int")
 
     def broadcast(
-        self, tensor: Union[torch.Tensor, float, str, None], src: int = 0, safe_mode: bool = False
-    ) -> Union[torch.Tensor, float, str]:
-        if not (isinstance(tensor, (torch.Tensor, Number, str)) or tensor is None):
+        self, tensor: torch.Tensor | float | str | Path | None, src: int = 0, safe_mode: bool = False
+    ) -> torch.Tensor | float | str | Path:
+        if not (isinstance(tensor, (torch.Tensor, Number, str, Path)) or tensor is None):
             raise TypeError(f"Unhandled input type {type(tensor)}")
 
         rank = self.get_rank()
@@ -232,7 +254,7 @@ class ComputationModel(metaclass=ABCMeta):
                 raise ValueError("Argument safe_mode should be True if None is passed for non src rank")
 
         device = self.device()
-        tensor_to_number = tensor_to_str = False
+        tensor_to_number = tensor_to_str = tensor_to_path = False
 
         if safe_mode:
             tensor = self._setup_placeholder(tensor, device, rank == src)
@@ -245,30 +267,37 @@ class ComputationModel(metaclass=ABCMeta):
             if rank != src:
                 tensor = torch.empty(1, device=device, dtype=torch.float)
             else:
-                tensor = torch.tensor([tensor,], device=device, dtype=torch.float)
-        elif isinstance(tensor, str):
-            tensor_to_str = True
-            max_length = self._get_max_length(tensor, device)
+                tensor = torch.tensor([tensor], device=device, dtype=torch.float)
+        elif isinstance(tensor, (str, Path)):
+            tensor_to_str = isinstance(tensor, str)
+            tensor_to_path = isinstance(tensor, Path)
+            tensor_str = str(tensor)
+            max_length = self._get_max_length(tensor_str, device)
             if rank != src:
                 tensor = torch.empty(1, max_length + 1, device=device, dtype=torch.long)
             else:
-                tensor = self._encode_str(tensor, device, size=max_length)
+                tensor = self._encode_str(tensor_str, device, size=max_length)
 
         tensor = self._apply_op(tensor, device, self._do_broadcast, src)
 
         if tensor_to_number:
             return tensor.item()
-        if tensor_to_str:
+        if tensor_to_str or tensor_to_path:
             list_str = self._decode_str(tensor)
-            return list_str[0]
+            result = list_str[0]
+            return Path(result) if tensor_to_path else result
         return tensor
 
     @abstractmethod
-    def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM") -> torch.Tensor:
+    def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM", group: Any | None = None) -> torch.Tensor:
         pass
 
     @abstractmethod
-    def _do_all_gather(self, tensor: torch.Tensor) -> torch.Tensor:
+    def _do_all_gather(self, tensor: torch.Tensor, group: Any | None = None) -> torch.Tensor:
+        pass
+
+    @abstractmethod
+    def _do_all_gather_object(self, tensor: Any, group: Any | None = None) -> list[Any]:
         pass
 
     @abstractmethod
@@ -279,16 +308,23 @@ class ComputationModel(metaclass=ABCMeta):
     def barrier(self) -> None:
         pass
 
+    @abstractmethod
+    def _do_new_group(self, ranks: list[int], **kwargs: Any) -> Any:
+        pass
+
+    @abstractmethod
+    def _rank_not_in_group(self, group: Any) -> bool:
+        pass
+
 
 class _SerialModel(ComputationModel):
-    """Private class defines non-distributed computation model for code compatibility with other distributed models.
-    """
+    """Private class defines non-distributed computation model for code compatibility with other distributed models."""
 
     name = "serial"
     available_backends = ()
 
-    def __init__(self, _backend: Optional[str] = None, **kwargs: Any) -> None:
-        super(_SerialModel, self).__init__()
+    def __init__(self, _backend: str | None = None, **kwargs: Any) -> None:
+        super().__init__()
 
     def get_local_rank(self) -> int:
         return 0
@@ -311,9 +347,11 @@ class _SerialModel(ComputationModel):
     def device(self) -> torch.device:
         if torch.cuda.is_available():
             return torch.device("cuda")
+        if _torch_version_gt_112 and torch.backends.mps.is_available():
+            return torch.device("mps")
         return torch.device("cpu")
 
-    def backend(self) -> Optional[str]:
+    def backend(self) -> str | None:
         return None
 
     def finalize(self) -> None:
@@ -323,40 +361,59 @@ class _SerialModel(ComputationModel):
         return 1
 
     @staticmethod
-    def create_from_context() -> "_SerialModel":
+    def create_from_context() -> _SerialModel:
         return _SerialModel()
 
     @staticmethod
-    def create_from_backend(backend: Optional[str] = None, **kwargs: Any) -> "_SerialModel":
+    def create_from_backend(backend: str | None = None, **kwargs: Any) -> _SerialModel:
         return _SerialModel()
 
     @staticmethod
     def spawn(*args: Any, **kwargs: Any) -> None:
         raise NotImplementedError("Serial computation model does not implement spawn method")
 
-    def all_reduce(self, tensor: Union[torch.Tensor, float], op: str = "SUM") -> Union[torch.Tensor, float]:
+    def all_reduce(
+        self, tensor: torch.Tensor | float, op: str = "SUM", group: Any | None = None
+    ) -> torch.Tensor | float:
         return tensor
 
-    def all_gather(self, tensor: Union[torch.Tensor, float, str]) -> Union[torch.Tensor, float, List[float], List[str]]:
+    def all_gather(
+        self, tensor: torch.Tensor | float | str | Any, group: Any | None = None
+    ) -> torch.Tensor | float | list[float] | list[str] | list[Any]:
         if isinstance(tensor, torch.Tensor):
             return tensor
-        return cast(Union[List[float], List[str]], [tensor])
+        return cast(list[float] | list[str] | list[Any], [tensor])
 
     def broadcast(
-        self, tensor: Union[torch.Tensor, float, str, None], src: int = 0, safe_mode: bool = False
-    ) -> Union[torch.Tensor, float, str]:
+        self, tensor: torch.Tensor | float | str | Path | None, src: int = 0, safe_mode: bool = False
+    ) -> torch.Tensor | float | str | Path:
         if tensor is None:
             raise ValueError("Argument tensor should not be None")
         return tensor
 
-    def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM") -> torch.Tensor:
+    def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM", group: Any | None = None) -> torch.Tensor:
         return tensor
 
-    def _do_all_gather(self, tensor: torch.Tensor) -> torch.Tensor:
+    def _do_all_gather(self, tensor: torch.Tensor, group: Any | None = None) -> torch.Tensor:
         return tensor
+
+    def _do_all_gather_object(self, tensor: Any, group: Any | None = None) -> Any:
+        return tensor
+
+    def _do_new_group(self, ranks: list[int], **kwargs: Any) -> Any:
+        return ranks
 
     def _do_broadcast(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
         return tensor
 
     def barrier(self) -> None:
         pass
+
+    def new_group(self, ranks: list[int], **kwargs: Any) -> Any:
+        if isinstance(ranks, list) and all(isinstance(item, int) for item in ranks):
+            return self._do_new_group(ranks, **kwargs)
+        else:
+            raise ValueError("Argument ranks should be list of int")
+
+    def _rank_not_in_group(self, group: Any) -> bool:
+        return False

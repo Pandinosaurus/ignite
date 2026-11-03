@@ -40,8 +40,6 @@
   <meta property="og:image:alt" content="PyTorch-Ignite logo">
   <meta property="og:description" content="High-level library to help with training and evaluating neural networks in PyTorch flexibly and transparently.">
 
-  <link rel="preconnect" href="https://BH4D9OD16A-dsn.algolia.net" crossorigin />
-
   {% block htmltitle %}
   <title>{{ title|striptags|e }}{{ titlesuffix }}</title>
   {% endblock %}
@@ -67,8 +65,10 @@
 
   {% endif %}
 
+  {%- if style is defined %}
   <link rel="preload" href="{{ pathto('_static/' + style, 1) }}" as="style" />
   <link rel="stylesheet" href="{{ pathto('_static/' + style, 1) }}" type="text/css" />
+  {%- endif %}
   <!-- <link rel="stylesheet" href="{{ pathto('_static/pygments.css', 1) }}" type="text/css" /> -->
   {%- for css in css_files %}
     {%- if css|attr("rel") %}
@@ -122,26 +122,26 @@
 <div class="container-fluid header-holder tutorials-header" id="header-holder">
   <div class="container">
 
-    <a class="header-logo" href="{{ theme_variables.external_urls['home'] }}" aria-label="PyTorch-Ignite"></a>
+    <a class="header-logo" href="/ignite" aria-label="PyTorch-Ignite"></a>
 
     <div class="header-container">
 
       <div class="main-menu">
         <ul>
           <li>
-            <a href="{{ pathto('quickstart') }}">Quickstart</a>
+            <a href="{{ theme_variables.external_urls['home'] }}/{{ theme_variables.external_urls['quickstart'] }}">Quickstart</a>
           </li>
 
           <li>
-            <a href="{{ pathto('concepts') }}">Concepts</a>
+            <a href="{{ theme_variables.external_urls['home'] }}/{{ theme_variables.external_urls['concepts'] }}">Concepts</a>
           </li>
 
-          <li>
-            <a href="{{ pathto('examples') }}">Examples</a>
-          </li>
+          <!-- <li>
+            <a href="{{ theme_variables.external_urls['home'] }}/{{ theme_variables.external_urls['examples'] }}">Examples</a>
+          </li> -->
 
           <li>
-            <a href="{{ pathto('faq') }}">FAQ</a>
+            <a href="{{ theme_variables.external_urls['home'] }}/{{ theme_variables.external_urls['faq'] }}">FAQ</a>
           </li>
 
           <li>
@@ -149,8 +149,14 @@
           </li>
 
           <li>
-            <a href="{{ theme_variables.external_urls['home'] }}/master/about.html">About us</a> 
+            <a href="{{ theme_variables.external_urls['home'] }}/{{ theme_variables.external_urls['about_us'] }}">About us</a>
           </li>
+
+          <li>
+            <a href="{{ theme_variables.external_urls['home'] }}">⊳ pytorch-ignite.ai</a>
+          </li>
+
+
 
         </ul>
       </div>
@@ -191,7 +197,13 @@
               {% endif %}
             {% endif %}
 
-            <div id="docsearch"></div>
+            <div role="search" id="search-icon-btn">
+              <form id="rtd-search-form" class="wy-form" action="{{ pathto('search') }}" method="get">
+                <input type="text" name="q" placeholder="{{ _('Search docs') }}" readonly/>
+                <input type="hidden" name="check_keywords" value="yes" />
+                <input type="hidden" name="area" value="default" />
+              </form>
+            </div>
 
             {% endblock %}
           </div>
@@ -495,6 +507,63 @@
 
   <script type="text/javascript" src="{{ pathto('_static/js/vendor/anchor.min.js', 1) }}"></script>
 
+  <div id="search-overlay">
+    <div class="search-overlay-content">
+      <span id="close-search">&times;</span>
+      <h3 class="search-overlay-title">Search Docs</h3>
+      <form id="overlay-rtd-search-form" class="wy-form" action="{{ pathto('search') }}" method="get">
+        <input type="text" name="q" placeholder="{{ _('Search docs') }}" id="overlay-search-input" />
+        <input type="hidden" name="check_keywords" value="yes" />
+        <input type="hidden" name="area" value="default" />
+        <button type="submit">Search</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener("DOMContentLoaded", function() {
+      var searchBtn = document.getElementById("search-icon-btn");
+      var searchOverlay = document.getElementById("search-overlay");
+      var closeSearch = document.getElementById("close-search");
+      var searchInput = document.getElementById("overlay-search-input");
+
+      if (searchBtn && searchOverlay) {
+        searchBtn.addEventListener("click", function(e) {
+          e.preventDefault();
+          searchOverlay.style.display = "flex";
+          setTimeout(function() { searchInput.focus(); }, 100);
+        });
+
+        closeSearch.addEventListener("click", function() {
+          searchOverlay.style.display = "none";
+        });
+
+        searchOverlay.addEventListener("click", function(e) {
+          if (e.target === searchOverlay) {
+            searchOverlay.style.display = "none";
+          }
+        });
+
+        document.addEventListener("keydown", function(e) {
+          if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+            e.preventDefault();
+            searchOverlay.style.display = "flex";
+            setTimeout(function() { searchInput.focus(); }, 100);
+          } else if (e.key === "Escape" && searchOverlay.style.display === "flex") {
+            e.preventDefault();
+            searchOverlay.style.display = "none";
+          }
+          else if (e.key === "Enter" && searchOverlay.style.display === "flex") {
+            var activeElement = document.activeElement;
+            if (activeElement === searchInput) {
+              e.preventDefault();
+              activeElement.form.submit();
+            }
+          }
+        });
+      }
+    });
+  </script>
   <script type="text/javascript">
     var collapsedSections = []
     $(document).ready(function() {
@@ -510,24 +579,6 @@
         $(this).closest("a").addClass("has-code");
       });
     })
-  </script>
-  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/@docsearch/js@1.0.0-alpha.28/dist/umd/index.min.js"></script>
-  <script type="text/javascript">
-  let VERSION
-  if ('{{ version }}'.startsWith('v')) {
-    VERSION = '{{ version }}'
-  } else {
-    VERSION = 'master'
-  }
-  docsearch({
-    container: '#docsearch',
-    apiKey: '19a7a7a75d87608d6f42c722ed1e293f',
-    indexName: 'ignite',
-    placeholder: 'Search PyTorch-Ignite docs',
-    searchParameters: {
-      facetFilters: [[`version:${VERSION}`, 'tags:ignite-web']],
-    }
-  });
   </script>
 </body>
 </html>

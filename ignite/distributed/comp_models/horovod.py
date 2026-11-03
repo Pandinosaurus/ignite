@@ -1,5 +1,9 @@
+from __future__ import annotations
+import os
 import warnings
-from typing import Any, Callable, Mapping, Optional, Tuple, cast
+from collections.abc import Callable, Mapping
+from typing import Any, cast, TYPE_CHECKING
+
 
 import torch
 
@@ -19,14 +23,20 @@ try:
 except ImportError:
     has_hvd_support = False
 
+    if TYPE_CHECKING:
+        # Tell the type checker that hvd imports are always defined.
+        import horovod.torch as hvd
+        from horovod import run as hvd_mp_spawn
+
 
 if has_hvd_support:
-
     HOROVOD = "horovod"
 
+    # Enables dynamic process sets: new_group methods and passing group into collective ops
+    os.environ["HOROVOD_DYNAMIC_PROCESS_SETS"] = "1"
+
     class _HorovodDistModel(ComputationModel):
-        """Private class for `Horovod <https://horovod.readthedocs.io/en/stable/>`_ distributed computation model.
-        """
+        """Private class for `Horovod <https://horovod.readthedocs.io/en/stable/>`_ distributed computation model."""
 
         name = "horovod-dist"
 
@@ -41,7 +51,7 @@ if has_hvd_support:
             return rank
 
         @staticmethod
-        def create_from_context() -> Optional["_HorovodDistModel"]:
+        def create_from_context() -> _HorovodDistModel | None:
             rank = _HorovodDistModel._get_hvd_rank()
             # hvd must be initialized
             if not rank > -1:
@@ -59,17 +69,17 @@ if has_hvd_support:
                 raise RuntimeError("Can not re-initialize Horovod if it is already initialized")
             return _HorovodDistModel(backend, **kwargs)
 
-        def __init__(self, backend: Optional[str] = None, **kwargs: Any) -> None:
-            """This is a private method. Please, use `create_from_backend` or `create_from_context`
-            """
-            super(_HorovodDistModel, self).__init__()
+        def __init__(self, backend: str | None = None, **kwargs: Any) -> None:
+            """This is a private method. Please, use `create_from_backend` or `create_from_context`"""
+            super().__init__()
             if backend is not None:
                 self._create_from_backend(backend, **kwargs)
             else:
                 self._init_from_context()
 
         def _create_from_backend(self, backend: str, **kwargs: Any) -> None:
-            self._backend = backend  # type: str
+            # pyrefly: ignore [bad-override]
+            self._backend: str = backend
             comm = kwargs.get("comm", None)
             hvd.init(comm=comm)
             self._setup_attrs()
@@ -119,7 +129,7 @@ if has_hvd_support:
             hvd.shutdown()
 
         @staticmethod
-        def _dist_worker_task_fn(backend: str, fn: Callable, args: Tuple, kwargs_dict: Mapping) -> None:
+        def _dist_worker_task_fn(backend: str, fn: Callable, args: tuple, kwargs_dict: Mapping) -> None:
             from ignite.distributed.utils import _set_model, finalize
 
             model = _HorovodDistModel.create_from_backend(backend)
@@ -128,12 +138,13 @@ if has_hvd_support:
             finalize()
 
         @staticmethod
-        def spawn(  # type: ignore[override]
+        # pyrefly: ignore [bad-override]
+        def spawn(
             fn: Callable,
-            args: Tuple,
-            kwargs_dict: Optional[Mapping] = None,
+            args: tuple,
+            kwargs_dict: Mapping | None = None,
             nproc_per_node: int = 1,
-            hosts: Optional[str] = None,
+            hosts: str | None = None,
             backend: str = HOROVOD,
             **kwargs: Any,
         ) -> None:
@@ -153,10 +164,19 @@ if has_hvd_support:
             hvd_mp_spawn(
                 _HorovodDistModel._dist_worker_task_fn,
                 args=(HOROVOD, fn, args, kwargs_dict),
-                np=nproc_per_node,
+                num_proc=nproc_per_node,
                 hosts=hosts,
                 **kwargs,
             )
+
+        def _setup_group(self, group: Any) -> hvd.ProcessSet:
+            if isinstance(group, list) and all(isinstance(item, int) for item in group):
+                group = self._do_new_group(group)
+            if not isinstance(group, hvd.ProcessSet):
+                raise ValueError(
+                    f"Argument group should be list of int or hvd.ProcessSet, got {type(group)}, group={group}"
+                )
+            return group
 
         _reduce_op_map = {
             "SUM": hvd.mpi_ops.Sum,
@@ -166,7 +186,9 @@ if has_hvd_support:
 
         _manual_reduce_op_map = {"MIN": torch.min, "MAX": torch.max, "PRODUCT": torch.prod}
 
-        def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM") -> torch.Tensor:
+        def _do_all_reduce(self, tensor: torch.Tensor, op: str = "SUM", group: Any | None = None) -> torch.Tensor:
+            if group is not None:
+                raise NotImplementedError("all_reduce with group for horovod is not implemented")
             if op in self._manual_reduce_op_map:
                 op_fn = self._manual_reduce_op_map[op]
                 return self._do_manual_all_reduce(tensor, op_fn)
@@ -186,10 +208,26 @@ if has_hvd_support:
             # output can also torch min/max_return_type: (min/max_vals, indices)
             return reduced_res[0]
 
-        def _do_all_gather(self, tensor: torch.Tensor) -> torch.Tensor:
+        def _do_all_gather(self, tensor: torch.Tensor, group: Any | None = None) -> torch.Tensor:
+            if group is not None:
+                group = self._setup_group(group)
+            if self._rank_not_in_group(group):
+                return tensor
             if tensor.ndimension() == 0:
                 tensor = tensor.unsqueeze(0)
-            return hvd.allgather(tensor)
+            if group is not None:
+                return hvd.allgather(tensor, process_set=group)
+            else:
+                return hvd.allgather(tensor)
+
+        def _do_all_gather_object(self, tensor: Any, group: Any | None = None) -> list[Any]:
+            if group is not None:
+                raise NotImplementedError("all_gather with group for horovod is not implemented")
+
+            return hvd.allgather_object(tensor)
+
+        def _do_new_group(self, ranks: list[int], **kwargs: Any) -> hvd.ProcessSet:
+            return hvd.add_process_set(ranks)
 
         def _do_broadcast(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
             return hvd.broadcast(tensor, root_rank=src)
@@ -198,3 +236,8 @@ if has_hvd_support:
             # https://github.com/horovod/horovod/issues/159#issuecomment-424834603
             # hvd.allreduce(torch.tensor(0, device=self.device()), name="barrier")
             hvd.allreduce(torch.tensor(0, device="cpu"), name="barrier")
+
+        def _rank_not_in_group(self, group: Any | None) -> bool:
+            if group is None:
+                return False
+            return not group.included()

@@ -1,9 +1,9 @@
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import torch
 
 from ignite.exceptions import NotComputableError
-from ignite.metrics.gan.utils import InceptionModel, _BaseInceptionMetric
+from ignite.metrics.gan.utils import _BaseInceptionMetric, InceptionModel
 
 # These decorators helps with distributed settings
 from ignite.metrics.metric import reinit__is_reduced, sync_all_reduce
@@ -23,7 +23,7 @@ class InceptionScore(_BaseInceptionMetric):
 
     More details can be found in `Barratt et al. 2018`__.
 
-    __ https://arxiv.org/pdf/1801.01973.pdf
+    __ https://arxiv.org/abs/1801.01973
 
     Args:
         num_features: number of features predicted by the model or number of classes of the model. Default
@@ -49,6 +49,11 @@ class InceptionScore(_BaseInceptionMetric):
 
     Examples:
 
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
+
         .. code-block:: python
 
             metric = InceptionScore()
@@ -72,21 +77,22 @@ class InceptionScore(_BaseInceptionMetric):
     .. versionadded:: 0.4.6
     """
 
+    _state_dict_all_req_keys = ("_num_examples", "_prob_total", "_total_kl_d")
+
     def __init__(
         self,
-        num_features: Optional[int] = None,
-        feature_extractor: Optional[torch.nn.Module] = None,
+        num_features: int | None = None,
+        feature_extractor: torch.nn.Module | None = None,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
     ) -> None:
-
         if num_features is None and feature_extractor is None:
             num_features = 1000
             feature_extractor = InceptionModel(return_features=False, device=device)
 
         self._eps = 1e-16
 
-        super(InceptionScore, self).__init__(
+        super().__init__(
             num_features=num_features,
             feature_extractor=feature_extractor,
             output_transform=output_transform,
@@ -95,24 +101,22 @@ class InceptionScore(_BaseInceptionMetric):
 
     @reinit__is_reduced
     def reset(self) -> None:
-
         self._num_examples = 0
 
-        self._prob_total = torch.zeros(self._num_features, dtype=torch.float64, device=self._device)
-        self._total_kl_d = torch.zeros(self._num_features, dtype=torch.float64, device=self._device)
+        self._prob_total = torch.zeros(self._num_features, dtype=self._double_dtype, device=self._device)
+        self._total_kl_d = torch.zeros(self._num_features, dtype=self._double_dtype, device=self._device)
 
-        super(InceptionScore, self).reset()
+        super().reset()  # type: ignore
 
     @reinit__is_reduced
     def update(self, output: torch.Tensor) -> None:
-
         probabilities = self._extract_features(output)
 
-        prob_sum = torch.sum(probabilities, 0, dtype=torch.float64)
+        prob_sum = torch.sum(probabilities, 0, dtype=self._double_dtype)
         log_prob = torch.log(probabilities + self._eps)
         if log_prob.dtype != probabilities.dtype:
             log_prob = log_prob.to(probabilities)
-        kl_sum = torch.sum(probabilities * log_prob, 0, dtype=torch.float64)
+        kl_sum = torch.sum(probabilities * log_prob, 0, dtype=self._double_dtype)
 
         self._num_examples += probabilities.shape[0]
         self._prob_total += prob_sum
@@ -120,7 +124,6 @@ class InceptionScore(_BaseInceptionMetric):
 
     @sync_all_reduce("_num_examples", "_prob_total", "_total_kl_d")
     def compute(self) -> float:
-
         if self._num_examples == 0:
             raise NotComputableError("InceptionScore must have at least one example before it can be computed.")
 

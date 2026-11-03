@@ -1,5 +1,5 @@
 from time import perf_counter
-from typing import Any, Optional
+from typing import Any
 
 from ignite.engine import Engine, Events
 
@@ -7,7 +7,7 @@ __all__ = ["Timer"]
 
 
 class Timer:
-    """ Timer object can be used to measure (average) time between events.
+    """Timer object can be used to measure (average) time between events.
 
     Args:
         average: if True, then when ``.value()`` method is called, the returned value
@@ -22,6 +22,9 @@ class Timer:
     Note:
         When using ``Timer(average=True)`` do not forget to call ``timer.step()`` every time an event occurs. See
         the examples below.
+
+    Note:
+        If ``Timer`` is attached to measure single epoch time, it can also record the time of all handlers attached prior to it. To obtain the actual time taken for the epoch completion, handlers have to be rearranged.
 
     Examples:
         Measuring total time of the epoch:
@@ -74,13 +77,16 @@ class Timer:
 
             from ignite.engine import Engine, Events
             from ignite.handlers import Timer
+
             trainer = Engine(training_update_function)
             timer = Timer(average=True)
-            timer.attach(trainer,
-                         start=Events.STARTED,
-                         resume=Events.ITERATION_STARTED,
-                         pause=Events.ITERATION_COMPLETED,
-                         step=Events.ITERATION_COMPLETED)
+            timer.attach(
+                trainer,
+                start=Events.STARTED,
+                resume=Events.ITERATION_STARTED,
+                pause=Events.ITERATION_COMPLETED,
+                step=Events.ITERATION_COMPLETED
+            )
     """
 
     def __init__(self, average: bool = False):
@@ -93,10 +99,10 @@ class Timer:
         engine: Engine,
         start: Events = Events.STARTED,
         pause: Events = Events.COMPLETED,
-        resume: Optional[Events] = None,
-        step: Optional[Events] = None,
+        resume: Events | None = None,
+        step: Events | None = None,
     ) -> "Timer":
-        """ Register callbacks to control the timer.
+        """Register callbacks to control the timer.
 
         Args:
             engine: Engine that this timer will be attached to.

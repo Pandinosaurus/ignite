@@ -1,4 +1,4 @@
-from typing import Callable, Sequence, Union
+from collections.abc import Callable, Sequence
 
 import torch
 
@@ -37,27 +37,35 @@ class MultiLabelConfusionMatrix(Metric):
             device to be the same as your ``update`` arguments ensures the ``update`` method is non-blocking. By
             default, CPU.
         normalized: whether to normalize confusion matrix by its sum or not.
+        skip_unrolling: specifies whether output should be unrolled before being fed to update method. Should be
+            true for multi-output model, for example, if ``y_pred`` contains multi-output as ``(y_pred_a, y_pred_b)``
+            Alternatively, ``output_transform`` can be used to handle this.
 
     Example:
+
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
 
         .. testcode::
 
             metric = MultiLabelConfusionMatrix(num_classes=3)
             metric.attach(default_evaluator, "mlcm")
-            y_true = torch.Tensor([
+            y_true = torch.tensor([
                 [0, 0, 1],
                 [0, 0, 0],
                 [0, 0, 0],
                 [1, 0, 0],
                 [0, 1, 1],
-            ]).long()
-            y_pred = torch.Tensor([
+            ])
+            y_pred = torch.tensor([
                 [1, 1, 0],
                 [1, 0, 1],
                 [1, 0, 0],
                 [1, 0, 1],
                 [1, 1, 0],
-            ]).long()
+            ])
             state = default_evaluator.run([[y_pred, y_true]])
             print(state.metrics["mlcm"])
 
@@ -74,14 +82,19 @@ class MultiLabelConfusionMatrix(Metric):
 
     .. versionadded:: 0.4.5
 
+    .. versionchanged:: 0.5.1
+        ``skip_unrolling`` argument is added.
     """
+
+    _state_dict_all_req_keys = ("confusion_matrix", "_num_examples")
 
     def __init__(
         self,
         num_classes: int,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
         normalized: bool = False,
+        skip_unrolling: bool = False,
     ):
         if num_classes <= 1:
             raise ValueError("Argument num_classes needs to be > 1")
@@ -89,7 +102,7 @@ class MultiLabelConfusionMatrix(Metric):
         self.num_classes = num_classes
         self._num_examples = 0
         self.normalized = normalized
-        super(MultiLabelConfusionMatrix, self).__init__(output_transform=output_transform, device=device)
+        super().__init__(output_transform=output_transform, device=device, skip_unrolling=skip_unrolling)
 
     @reinit__is_reduced
     def reset(self) -> None:
@@ -121,7 +134,7 @@ class MultiLabelConfusionMatrix(Metric):
             raise NotComputableError("Confusion matrix must have at least one example before it can be computed.")
 
         if self.normalized:
-            conf = self.confusion_matrix.to(dtype=torch.float64)
+            conf = self.confusion_matrix.to(dtype=self._double_dtype)
             sums = conf.sum(dim=(1, 2))
             return conf / sums[:, None, None]
 
@@ -159,8 +172,8 @@ class MultiLabelConfusionMatrix(Metric):
         if y.dtype not in valid_types:
             raise ValueError(f"y must be of any type: {valid_types}")
 
-        if not torch.equal(y_pred, y_pred ** 2):
+        if not torch.equal(y_pred, y_pred**2):
             raise ValueError("y_pred must be a binary tensor")
 
-        if not torch.equal(y, y ** 2):
+        if not torch.equal(y, y**2):
             raise ValueError("y must be a binary tensor")

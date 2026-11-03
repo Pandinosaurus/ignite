@@ -5,18 +5,30 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
+from packaging.version import Version
 from pytest import approx, raises
 from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score
 
 import ignite.distributed as idist
 from ignite.engine import Engine, Events, State
-from ignite.metrics import ConfusionMatrix, Precision, Recall
-from ignite.metrics.metric import BatchFiltered, BatchWise, EpochWise, Metric, reinit__is_reduced, sync_all_reduce
+from ignite.metrics import Accuracy, ConfusionMatrix, Precision, Recall
+from ignite.metrics.metric import (
+    BatchFiltered,
+    BatchWise,
+    EpochWise,
+    Metric,
+    RunningBatchWise,
+    RunningEpochWise,
+    SingleEpochRunningBatchWise,
+    reinit__is_reduced,
+    sync_all_reduce,
+)
+from ignite.utils import _tree_map
 
 
 class DummyMetric1(Metric):
     def __init__(self, true_output, output_transform=lambda x: x):
-        super(DummyMetric1, self).__init__(output_transform=output_transform)
+        super().__init__(output_transform=output_transform)
         self.true_output = true_output
 
     def reset(self):
@@ -29,17 +41,8 @@ class DummyMetric1(Metric):
         assert output == self.true_output
 
 
-@pytest.mark.distributed
-@pytest.mark.skipif("WORLD_SIZE" not in os.environ, reason="Skip if WORLD_SIZE not in env vars")
-@pytest.mark.skipif(torch.cuda.is_available(), reason="Skip if GPU")
-def test_metric_warning(distributed_context_single_node_gloo):
-    y = torch.tensor([1.0])
-    with pytest.warns(RuntimeWarning, match=r"DummyMetric1 class does not support distributed setting"):
-        DummyMetric1((y, y))
-
-
 def test_no_transform():
-    y_pred = torch.Tensor([[2.0], [-2.0]])
+    y_pred = torch.tensor([[2.0], [-2.0]])
     y = torch.zeros(2)
 
     metric = DummyMetric1(true_output=(y_pred, y))
@@ -49,7 +52,7 @@ def test_no_transform():
 
 
 def test_transform():
-    y_pred = torch.Tensor([[2.0], [-2.0]])
+    y_pred = torch.tensor([[2.0], [-2.0]])
     y = torch.zeros(2)
 
     def transform(output):
@@ -96,7 +99,7 @@ def test_output_as_mapping_keys_is_none():
 
 
 def test_output_as_mapping():
-    y_pred = torch.Tensor([[2.0], [-2.0]])
+    y_pred = torch.tensor([[2.0], [-2.0]])
     y = torch.zeros(2)
 
     metric = DummyMetric1(true_output=(y_pred, y))
@@ -128,17 +131,18 @@ def test_no_grad():
     metric.iteration_completed(engine)
 
 
-def test_arithmetics():
+@pytest.mark.parametrize("as_tensor", [False, True])
+def test_arithmetics(as_tensor):
     class ListGatherMetric(Metric):
         def __init__(self, index):
             self.index = index
-            super(ListGatherMetric, self).__init__()
+            super().__init__()
 
         def reset(self):
             self.list_ = []
 
         def update(self, output):
-            self.list_ = output
+            self.list_ = torch.tensor(output, dtype=torch.float64) if as_tensor else output
 
         def compute(self):
             return self.list_[self.index]
@@ -199,19 +203,19 @@ def test_arithmetics():
     assert m2_times_2.compute() == 200
 
     # __pow__
-    m0_pow_m1 = m0 ** m1
+    m0_pow_m1 = m0**m1
     m0.update([1, 10, 100])
     m1.update([1, 10, 100])
     assert m0_pow_m1.compute() == 1
     m0.update([2, 20, 200])
     m1.update([2, 20, 200])
-    assert m0_pow_m1.compute() == 2 ** 20
+    assert m0_pow_m1.compute() == 2**20
 
-    m2_pow_2 = m2 ** 2
+    m2_pow_2 = m2**2
     m2.update([1, 10, 100])
     assert m2_pow_2.compute() == 10000
 
-    m2_pow_2 = 0.99 ** m2
+    m2_pow_2 = 0.99**m2
     m2.update([1, 10, 100])
     assert m2_pow_2.compute() == 0.3660323412732292
 
@@ -279,7 +283,7 @@ def test_attach():
     class CountMetric(Metric):
         def __init__(self, value):
             self.reset_count = 0
-            super(CountMetric, self).__init__()
+            super().__init__()
             self.reset_count = 0
             self.compute_count = 0
             self.update_count = 0
@@ -413,7 +417,6 @@ def test_abstract_class():
 
 def test_pytorch_operators():
     def _test(composed_metric, metric_name, compute_true_value_fn):
-
         metrics = {
             metric_name: composed_metric,
         }
@@ -437,7 +440,7 @@ def test_pytorch_operators():
         d = data(y_pred, y)
         state = validator.run(d, max_epochs=1, epoch_length=y_pred.shape[0])
 
-        assert set(state.metrics.keys()) == set([metric_name,])
+        assert set(state.metrics.keys()) == set([metric_name])
         np_y_pred = np.argmax(y_pred.numpy(), axis=-1).ravel()
         np_y = y.numpy().ravel()
         assert state.metrics[metric_name] == approx(compute_true_value_fn(np_y_pred, np_y))
@@ -544,6 +547,29 @@ class DummyMetric2(Metric):
         pass
 
 
+def _test_compute_with_sync_all_reduce_doesnt_change_attributes(device):
+    class DummyMetric3(Metric):
+        @reinit__is_reduced
+        def reset(self):
+            self.a = torch.tensor(0.0, device=self._device)
+            self.b = 0.0
+
+        def update(self, output):
+            self.a += torch.tensor(1.0)
+            self.b += 1.0
+
+        @sync_all_reduce("a", "b")
+        def compute(self):
+            return self.a.item(), self.b
+
+    metric_device = device if torch.device(device).type != "xla" else "cpu"
+    metric = DummyMetric3(device=metric_device)
+    metric.update(None)
+    assert metric.a.item() == metric.b == 1.0
+    metric.compute()
+    assert metric.a.item() == metric.b == 1.0
+
+
 def _test_invalid_sync_all_reduce(device):
     class InvalidMetric(Metric):
         @reinit__is_reduced
@@ -552,6 +578,7 @@ def _test_invalid_sync_all_reduce(device):
             self.c = 0.0
             self.n = 0
             self.m = -1
+            self.d = "a string"
 
         def compute(self):
             pass
@@ -575,6 +602,14 @@ def _test_invalid_sync_all_reduce(device):
         def invalid_reduction_op_4(self):
             pass
 
+        @sync_all_reduce("missingattr")
+        def invalid_reduction_op_5(self):
+            pass
+
+        @sync_all_reduce("d")
+        def invalid_reduction_op_6(self):
+            pass
+
     metric_device = device if torch.device(device).type != "xla" else "cpu"
     m = InvalidMetric(device=metric_device)
     m.reset()
@@ -591,6 +626,14 @@ def _test_invalid_sync_all_reduce(device):
 
         with pytest.raises(ValueError, match=r"Reduction operation is not valid"):
             m.invalid_reduction_op_4()
+
+        with pytest.raises(ValueError, match=r"has no attribute named `missingattr`."):
+            m.invalid_reduction_op_5()
+
+        with pytest.raises(
+            TypeError, match=r"Attribute provided to sync_all_reduce should be a number or tensor but `d`"
+        ):
+            m.invalid_reduction_op_6()
 
 
 def _test_distrib_sync_all_reduce_decorator(device):
@@ -656,7 +699,7 @@ def _test_distrib_sync_all_reduce_decorator(device):
     m = DummyMetric(device=metric_device)
     m.update(None)
     m.compute()
-    # check if can call compute multiple times without all reduce invocation
+    # check if attributes are restored to their original values after previous `compute`
     m.compute()
 
 
@@ -668,52 +711,59 @@ def _test_creating_on_xla_fails(device):
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
+@pytest.mark.skipif(Version(torch.__version__) < Version("1.7.0"), reason="Skip if < 1.7.0")
 def test_distrib_nccl_gpu(distributed_context_single_node_nccl):
-
     device = idist.device()
     _test_distrib_sync_all_reduce_decorator(device)
     _test_invalid_sync_all_reduce(device)
+    _test_compute_with_sync_all_reduce_doesnt_change_attributes(device)
+
+    test_state_dict()
+    test_load_state_dict()
 
 
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
+@pytest.mark.skipif(Version(torch.__version__) < Version("1.7.0"), reason="Skip if < 1.7.0")
 def test_distrib_gloo_cpu_or_gpu(distributed_context_single_node_gloo):
-
     device = idist.device()
     _test_distrib_sync_all_reduce_decorator(device)
     _test_invalid_sync_all_reduce(device)
+    _test_compute_with_sync_all_reduce_doesnt_change_attributes(device)
+    test_state_dict()
+    test_load_state_dict()
 
 
 @pytest.mark.distributed
 @pytest.mark.skipif(not idist.has_hvd_support, reason="Skip if no Horovod dist support")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test_distrib_hvd(gloo_hvd_executor):
-
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     nproc = 4 if not torch.cuda.is_available() else torch.cuda.device_count()
 
     gloo_hvd_executor(_test_distrib_sync_all_reduce_decorator, (device,), np=nproc, do_init=True)
     gloo_hvd_executor(_test_invalid_sync_all_reduce, (device,), np=nproc, do_init=True)
+    gloo_hvd_executor(_test_compute_with_sync_all_reduce_doesnt_change_attributes, (device,), np=nproc, do_init=True)
 
 
 @pytest.mark.multinode_distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_gloo_cpu_or_gpu(distributed_context_multi_node_gloo):
-
     device = idist.device()
     _test_distrib_sync_all_reduce_decorator(device)
     _test_invalid_sync_all_reduce(device)
+    _test_compute_with_sync_all_reduce_doesnt_change_attributes(device)
 
 
 @pytest.mark.multinode_distributed
 @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
 @pytest.mark.skipif("GPU_MULTINODE_DISTRIB" not in os.environ, reason="Skip if not multi-node distributed")
 def test_multinode_distrib_nccl_gpu(distributed_context_multi_node_nccl):
-
     device = idist.device()
     _test_distrib_sync_all_reduce_decorator(device)
     _test_invalid_sync_all_reduce(device)
+    _test_compute_with_sync_all_reduce_doesnt_change_attributes(device)
 
 
 @pytest.mark.tpu
@@ -724,6 +774,7 @@ def test_distrib_single_device_xla():
     _test_distrib_sync_all_reduce_decorator(device)
     _test_creating_on_xla_fails(device)
     _test_invalid_sync_all_reduce(device)
+    _test_compute_with_sync_all_reduce_doesnt_change_attributes(device)
 
 
 def _test_distrib_xla_nprocs(index):
@@ -731,6 +782,7 @@ def _test_distrib_xla_nprocs(index):
     _test_distrib_sync_all_reduce_decorator(device)
     _test_creating_on_xla_fails(device)
     _test_invalid_sync_all_reduce(device)
+    _test_compute_with_sync_all_reduce_doesnt_change_attributes(device)
 
 
 @pytest.mark.tpu
@@ -780,7 +832,6 @@ def test_completed():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Skip if no GPU")
 def test_completed_on_cuda():
-
     # Checks https://github.com/pytorch/ignite/issues/1635#issuecomment-863026919
 
     class DummyMetric(Metric):
@@ -808,86 +859,139 @@ def test_usage_exception():
     m = DummyMetric2()
     with pytest.raises(TypeError, match=r"Unhandled usage type"):
         m.attach(engine, "dummy", usage=1)
-    with pytest.raises(ValueError, match=r"usage should be 'EpochWise.usage_name' or 'BatchWise.usage_name'"):
+    with pytest.raises(
+        ValueError,
+        match=r"usage should be '\(Running\)EpochWise.usage_name' or '\(\(SingleEpoch\)Running\)BatchWise.usage_name'",
+    ):
         m.attach(engine, "dummy", usage="fake")
 
 
-def test_epochwise_usage():
-    class MyMetric(Metric):
-        def __init__(self):
-            super(MyMetric, self).__init__()
-            self.value = []
+class DummyAccumulateInListMetric(Metric):
+    def __init__(self):
+        super().__init__()
+        self.value = []
 
-        def reset(self):
-            self.value = []
+    def reset(self):
+        self.value = []
 
-        def compute(self):
-            return self.value
+    def compute(self):
+        return self.value
 
-        def update(self, output):
-            self.value.append(output)
-
-    def test(usage):
-        engine = Engine(lambda e, b: b)
-
-        m = MyMetric()
-
-        m.attach(engine, "ewm", usage=usage)
-
-        @engine.on(Events.EPOCH_COMPLETED)
-        def _():
-            ewm = engine.state.metrics["ewm"]
-            assert len(ewm) == 3
-            assert ewm == [0, 1, 2]
-
-        engine.run([0, 1, 2], max_epochs=10)
-        m.detach(engine, usage=usage)
-
-    test("epoch_wise")
-    test(EpochWise.usage_name)
-    test(EpochWise())
+    def update(self, output):
+        self.value.append(output)
 
 
-def test_batchwise_usage():
-    class MyMetric(Metric):
-        def __init__(self):
-            super(MyMetric, self).__init__()
-            self.value = []
+@pytest.mark.parametrize("usage", ["epoch_wise", EpochWise.usage_name, EpochWise()])
+def test_epochwise_usage(usage):
+    engine = Engine(lambda e, b: b)
 
-        def reset(self):
-            self.value = []
+    m = DummyAccumulateInListMetric()
 
-        def compute(self):
-            return self.value
+    m.attach(engine, "ewm", usage=usage)
 
-        def update(self, output):
-            self.value.append(output)
+    @engine.on(Events.EPOCH_COMPLETED)
+    def _():
+        ewm = engine.state.metrics["ewm"]
+        assert len(ewm) == 3
+        assert ewm == [0, 1, 2]
 
-    def test(usage):
-        engine = Engine(lambda e, b: b)
+    engine.run([0, 1, 2], max_epochs=10)
+    m.detach(engine, usage=usage)
 
-        m = MyMetric()
 
-        m.attach(engine, "bwm", usage=usage)
+class DummyAccumulateMetric(Metric):
+    def __init__(self):
+        super().__init__()
+        self.value = 0
 
-        @engine.on(Events.ITERATION_COMPLETED)
-        def _():
-            bwm = engine.state.metrics["bwm"]
-            assert len(bwm) == 1
-            assert bwm[0] == (engine.state.iteration - 1) % 3
+    def reset(self):
+        self.value = 0
 
-        engine.run([0, 1, 2], max_epochs=10)
-        m.detach(engine, usage=usage)
+    def compute(self):
+        return self.value
 
-    test("batch_wise")
-    test(BatchWise.usage_name)
-    test(BatchWise())
+    def update(self, output):
+        self.value += output
+
+
+@pytest.mark.parametrize("usage", ["running_epoch_wise", RunningEpochWise.usage_name, RunningEpochWise()])
+def test_running_epochwise_usage(usage):
+    engine = Engine(lambda e, b: e.state.metrics["ewm"])
+
+    engine.state.metrics["ewm"] = 0
+
+    @engine.on(Events.EPOCH_STARTED)
+    def _():
+        engine.state.metrics["ewm"] += 1
+
+    m = DummyAccumulateMetric()
+    m.attach(engine, "rewm", usage=usage)
+
+    @engine.on(Events.EPOCH_COMPLETED)
+    def _():
+        assert engine.state.metrics["rewm"] == sum(range(engine.state.epoch + 1))
+
+    engine.run([0, 1, 2], max_epochs=10)
+
+    m.detach(engine, usage=usage)
+
+
+@pytest.mark.parametrize("usage", ["batch_wise", BatchWise.usage_name, BatchWise()])
+def test_batchwise_usage(usage):
+    engine = Engine(lambda e, b: b)
+
+    m = DummyAccumulateInListMetric()
+
+    m.attach(engine, "bwm", usage=usage)
+
+    @engine.on(Events.ITERATION_COMPLETED)
+    def _():
+        bwm = engine.state.metrics["bwm"]
+        assert len(bwm) == 1
+        assert bwm[0] == (engine.state.iteration - 1) % 3
+
+    engine.run([0, 1, 2], max_epochs=10)
+    m.detach(engine, usage=usage)
+
+
+@pytest.mark.parametrize("usage", ["running_batch_wise", RunningBatchWise.usage_name, RunningBatchWise()])
+def test_running_batchwise_usage(usage):
+    engine = Engine(lambda e, b: b)
+
+    m = DummyAccumulateMetric()
+    m.attach(engine, "rbwm", usage=usage)
+
+    @engine.on(Events.EPOCH_COMPLETED)
+    def _():
+        assert engine.state.metrics["rbwm"] == 6 * engine.state.epoch
+
+    engine.run([0, 1, 2, 3], max_epochs=10)
+
+    m.detach(engine, usage=usage)
+
+
+@pytest.mark.parametrize(
+    "usage", ["single_epoch_running_batch_wise", SingleEpochRunningBatchWise.usage_name, SingleEpochRunningBatchWise()]
+)
+def test_single_epoch_running_batchwise_usage(usage):
+    engine = Engine(lambda e, b: b)
+
+    m = DummyAccumulateMetric()
+    m.attach(engine, "rbwm", usage=usage)
+
+    @engine.on(Events.EPOCH_COMPLETED)
+    def _():
+        assert engine.state.metrics["rbwm"] == 6
+
+    engine.run([0, 1, 2, 3], max_epochs=10)
+
+    m.detach(engine, usage=usage)
 
 
 def test_batchfiltered_usage():
     class MyMetric(Metric):
         def __init__(self):
-            super(MyMetric, self).__init__()
+            super().__init__()
             self.value = []
 
         def reset(self):
@@ -961,7 +1065,7 @@ def test_override_required_output_keys():
     evaluator.run(data)
 
 
-@pytest.mark.parametrize("shapes", [[(10,), ()], [(5, 32, 32), (5, 32, 32)],])
+@pytest.mark.parametrize("shapes", [[(10,), ()], [(5, 32, 32), (5, 32, 32)]])
 def test_list_of_tensors_and_numbers(shapes):
     def check_fn(output):
         assert len(output) == 2
@@ -983,7 +1087,7 @@ def test_list_of_tensors_and_numbers(shapes):
 
     class MyMetric(Metric):
         def __init__(self, check_fn):
-            super(MyMetric, self).__init__()
+            super().__init__()
             self.check_fn = check_fn
 
         def reset(self):
@@ -1031,3 +1135,422 @@ def test_list_of_tensors_and_numbers_unsupported_output():
 
     with pytest.raises(ValueError, match=r"Output should have 2 items of the same length"):
         engine.run([0] * 10)
+
+
+class DummyMetric4(Metric):
+    _state_dict_all_req_keys = (
+        "dnumber",
+        "fnumber",
+        "tensor",
+        "tensor2",
+        "metric",
+        "metric_dict",
+        "metric_list",
+        "initially_none",
+    )
+
+    @staticmethod
+    def gen_expected_state(value):
+        expected_state = {
+            "dnumber": value + 1,
+            "fnumber": value + 2.234,
+            "tensor": torch.tensor(value + 2.5),
+            "tensor2": torch.tensor(value + 3.5),
+            "metric": {
+                "_num_correct": torch.tensor(value + 3),
+                "_num_examples": value + 4,
+            },
+            "metric_dict": {
+                "m1": {
+                    "_num_correct": torch.tensor(value + 5),
+                    "_num_examples": value + 6,
+                },
+                "m2": {
+                    "_numerator": torch.tensor([value + 7, value + 8]),
+                    "_denominator": torch.tensor([value + 9, value + 10]),
+                    "_weight": value,
+                    "_updated": True,
+                },
+                "n": value + 12,
+            },
+            "metric_list": [
+                {
+                    "_numerator": torch.tensor([value + 11, value + 12]),
+                    "_denominator": torch.tensor([value + 13, value + 14]),
+                    "_weight": value,
+                    "_updated": True,
+                },
+                {
+                    "_numerator": torch.tensor([value + 15, value + 16]),
+                    "_denominator": torch.tensor([value + 17, value + 18]),
+                    "_weight": value,
+                    "_updated": True,
+                },
+                value + 234,
+            ],
+            "initially_none": None,
+        }
+        return expected_state
+
+    def __init__(self, value):
+        super().reset()
+
+        self.expected_state = DummyMetric4.gen_expected_state(value)
+
+        self.dnumber = self.expected_state["dnumber"]
+        self.fnumber = self.expected_state["fnumber"]
+        self.tensor = self.expected_state["tensor"]
+        self.tensor2 = self.expected_state["tensor2"]
+
+        self.metric = Accuracy()
+        self.metric._num_correct = self.expected_state["metric"]["_num_correct"]
+        self.metric._num_examples = self.expected_state["metric"]["_num_examples"]
+
+        self.metric_dict: dict[str, Metric] = {
+            "m1": Accuracy(),
+            "m2": Precision(),
+            "n": self.expected_state["metric_dict"]["n"],
+        }
+        self.metric_dict["m1"]._num_correct = self.expected_state["metric_dict"]["m1"]["_num_correct"]
+        self.metric_dict["m1"]._num_examples = self.expected_state["metric_dict"]["m1"]["_num_examples"]
+        self.metric_dict["m2"]._numerator = self.expected_state["metric_dict"]["m2"]["_numerator"]
+        self.metric_dict["m2"]._denominator = self.expected_state["metric_dict"]["m2"]["_denominator"]
+        self.metric_dict["m2"]._weight = self.expected_state["metric_dict"]["m2"]["_weight"]
+        self.metric_dict["m2"]._updated = self.expected_state["metric_dict"]["m2"]["_updated"]
+
+        self.metric_list: list[Metric] = [
+            Recall(),
+            Precision(),
+            self.expected_state["metric_list"][2],
+        ]
+        self.metric_list[0]._numerator = self.expected_state["metric_list"][0]["_numerator"]
+        self.metric_list[0]._denominator = self.expected_state["metric_list"][0]["_denominator"]
+        self.metric_list[0]._weight = self.expected_state["metric_list"][0]["_weight"]
+        self.metric_list[0]._updated = self.expected_state["metric_list"][0]["_updated"]
+
+        self.metric_list[1]._numerator = self.expected_state["metric_list"][1]["_numerator"]
+        self.metric_list[1]._denominator = self.expected_state["metric_list"][1]["_denominator"]
+        self.metric_list[1]._weight = self.expected_state["metric_list"][1]["_weight"]
+        self.metric_list[1]._updated = self.expected_state["metric_list"][1]["_updated"]
+
+        self.initially_none = None
+
+    def reset(self):
+        self.dnumber = -1
+        self.fnumber = -2.0
+        self.tensor = torch.tensor([-3])
+        self.tensor2 = 0
+        self.metric.reset()
+        for m in self.metric_dict.values():
+            if isinstance(m, Metric):
+                m.reset()
+        for m in self.metric_list:
+            if isinstance(m, Metric):
+                m.reset()
+        self.initially_none = None
+
+    def update(self, output):
+        pass
+
+    def compute(self):
+        pass
+
+
+def test_wrong_state_dict():
+    class WrongMetric(Metric):
+        _state_dict_all_req_keys = ("object",)
+
+        def __init__(self, value):
+            super().__init__()
+            self.object = value
+
+        def reset(self):
+            pass
+
+        def update(self, output):
+            pass
+
+        def compute(self):
+            pass
+
+    metric = WrongMetric(object())
+    with pytest.raises(TypeError, match="Found attribute of unsupported type. Currently, supported types include"):
+        metric.state_dict()
+
+    delattr(metric, "object")
+    with pytest.raises(ValueError, match="Found a value in _state_dict_all_req_keys that is not among"):
+        metric.state_dict()
+
+
+def test_wrong_load_state_dict():
+    metric = DummyMetric4(1)
+
+    with pytest.raises(TypeError, match="Argument state_dict should be a dictionary"):
+        metric.load_state_dict(123)
+
+    with pytest.raises(ValueError, match="Incorrect state_dict object. Argument state_dict should be a dictionary"):
+        metric.load_state_dict({"abc": 123})
+
+    with pytest.raises(ValueError, match="Expected a list of state_dicts of size equal world_size"):
+        metric.load_state_dict({Metric._Metric__state_dict_key_per_rank: []})
+
+
+# @pytest.mark.distributed
+# @pytest.mark.skipif(not idist.has_native_dist_support, reason="Skip if no native dist support")
+# @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
+# def test_distrib_state_dict_metric_in_metric(distributed_context_single_node_nccl):
+#     class _TestMetric(Metric):
+#         _state_dict_all_req_keys = ("metric", )
+#         def __init__(self):
+#             self.metric = Accuracy()
+
+#         def reset(self):
+#             self.metric.reset()
+
+#         def update(self, output):
+#             self.metric.update(output)
+
+#         def compute(self):
+#             return self.metric.compute()
+
+#     m = _TestMetric()
+#     m.update((
+#         torch.rand(4, 10),
+#         torch.randint(0, 10, size=(4, )),
+#     ))
+
+#     rank = idist.get_rank()
+
+#     import time
+#     time.sleep(rank * 0.1)
+
+#     print("m: ", m.state_dict())
+#     assert False
+
+
+def test_state_dict():
+    metric = DummyMetric4(1)
+    state = metric.state_dict()
+
+    assert isinstance(state, dict) and len(state) == 1 and Metric._Metric__state_dict_key_per_rank in state
+
+    rank = idist.get_rank()
+    ws = idist.get_world_size()
+
+    list_state_dicts = state[Metric._Metric__state_dict_key_per_rank]
+    assert len(list_state_dicts) == ws
+
+    state = list_state_dicts[rank]
+    expected_state = metric.expected_state
+    assert state.keys() == expected_state.keys()
+
+    # Flatten expected state and output state and compare values
+    output_flatten = []
+    expected_flatten = []
+
+    def get_func(flatten):
+        def wrapper(x, key):
+            if isinstance(x, Metric):
+                flatten.extend([(key, getattr(x, k)) for k in x._state_dict_all_req_keys])
+            else:
+                flatten.append((key, x))
+
+        return wrapper
+
+    _tree_map(get_func(expected_flatten), expected_state)
+    _tree_map(get_func(output_flatten), state)
+
+    assert len(output_flatten) == len(expected_flatten) and len(expected_flatten) > 0, (
+        expected_flatten,
+        output_flatten,
+    )
+
+    for key_output, key_expected in zip(output_flatten, expected_flatten):
+        key1, output = key_output
+        key2, expected = key_expected
+        assert key1 == key2, (key1, key2)
+        if isinstance(output, torch.Tensor):
+            assert isinstance(expected, torch.Tensor)
+            assert (output == expected).all(), (output, expected)
+        else:
+            assert output == expected, (output, expected)
+
+
+def test_load_state_dict():
+    metric = DummyMetric4(1)
+    state = metric.state_dict()
+
+    metric.reset()
+    metric.initially_none = 1
+    metric.load_state_dict(state)
+
+    rank = idist.get_rank()
+    world_size = idist.get_world_size()
+    assert len(state[Metric._Metric__state_dict_key_per_rank]) == world_size
+    expected_state = state[Metric._Metric__state_dict_key_per_rank][rank]
+
+    # Flatten expected state and output state and compare values
+    output_flatten = []
+    expected_flatten = []
+
+    def get_func(flatten):
+        def wrapper(x, **kwargs):
+            if isinstance(x, Metric):
+                flatten.extend([getattr(x, k) for k in x._state_dict_all_req_keys])
+            else:
+                flatten.append(x)
+
+        return wrapper
+
+    _tree_map(get_func(expected_flatten), expected_state)
+    _tree_map(get_func(output_flatten), {key: getattr(metric, key) for key in metric._state_dict_all_req_keys})
+
+    assert len(output_flatten) == len(expected_flatten) and len(expected_flatten) > 0, (
+        expected_flatten,
+        output_flatten,
+    )
+
+    for output, expected in zip(output_flatten, expected_flatten):
+        if isinstance(output, torch.Tensor):
+            assert isinstance(expected, torch.Tensor)
+            assert (output == expected).all(), (output, expected)
+        else:
+            assert output == expected, (output, expected)
+
+
+class DummyMetric5(Metric):
+    def __init__(self, true_output, output_transform=lambda x: x, skip_unrolling=False):
+        super().__init__(output_transform=output_transform, skip_unrolling=skip_unrolling)
+        self.true_output = true_output
+
+    def reset(self):
+        pass
+
+    def compute(self):
+        pass
+
+    def update(self, output):
+        assert output == self.true_output
+
+
+def test_skip_unrolling():
+    # y_pred and y are outputs received from a multi_output model
+    a_pred = torch.rand(8, 1)
+    b_pred = torch.rand(8, 1)
+    y_pred = [a_pred, b_pred]
+    a_true = torch.rand(8, 1)
+    b_true = torch.rand(8, 1)
+    y_true = [a_true, b_true]
+
+    metric = DummyMetric5(true_output=(y_pred, y_true), skip_unrolling=True)
+    state = State(output=(y_pred, y_true))
+    engine = MagicMock(state=state)
+    metric.iteration_completed(engine)
+
+
+class DummyMetric6(Metric):
+    def reset(self):
+        pass
+
+    def compute(self):
+        pass
+
+    def update(self, output):
+        pass
+
+    def __call__(self, value):
+        pass
+
+
+def test_access_to_metric_dunder_attributes():
+    metric = DummyMetric6()
+    import inspect
+
+    # `inspect.signature` accesses `__signature__` attribute of the metric.
+    assert "value" in inspect.signature(metric).parameters.keys()
+
+
+def test_getattr_typo_reports_definition_site():
+    """__getattr__ should report where the bad attribute was accessed, not deep inside compute()."""
+
+    class ScalarMetric(Metric):
+        def reset(self):
+            self._values = torch.tensor([])
+
+        def update(self, output):
+            self._values = torch.cat([self._values, torch.tensor([output])])
+
+        def compute(self):
+            return self._values
+
+    engine = Engine(lambda e, b: b)
+    m = ScalarMetric()
+
+    # Typo: .meen() instead of .mean()
+    bad = m.meen()
+    bad.attach(engine, "bad")
+
+    with pytest.raises(AttributeError, match=r"Metric result of type .* has no attribute 'meen'"):
+        engine.run([1.0, 2.0, 3.0], max_epochs=1)
+
+
+def test_output_transform_type_check():
+    y_pred = torch.tensor([[2.0], [-2.0]])
+    y = torch.zeros(2)
+    with pytest.raises(TypeError, match="Argument output_transform should be callable"):
+        DummyMetric1(true_output=(y_pred, y), output_transform=1)
+
+
+class MappingMetric(Metric):
+    def __init__(self, mapping, **kwargs):
+        super().__init__(**kwargs)
+        self._mapping = mapping
+
+    def reset(self):
+        pass
+
+    def update(self, output):
+        pass
+
+    def compute(self):
+        return dict(self._mapping)
+
+
+def _run_and_get_metrics(metric: Metric, name: str):
+    engine = Engine(lambda e, x: 0)
+    metric.attach(engine, name)
+    engine.run([0], max_epochs=1)
+    return engine.state.metrics
+
+
+@pytest.mark.parametrize(
+    "mode,expect_map,expect_keys",
+    [
+        ("flatten", False, {"a": 1, "b": 2}),
+        ("named", True, None),
+        ("both", True, {"a": 1, "b": 2}),
+    ],
+)
+def test_metrics_result_mode_parametrized(mode, expect_map, expect_keys):
+    mapping = {"a": 1, "b": 2}
+    metric = MappingMetric(mapping, metrics_result_mode=mode)
+    metrics = _run_and_get_metrics(metric, "map")
+
+    if expect_map:
+        assert metrics.get("map") == mapping
+    else:
+        assert "map" not in metrics
+
+    if expect_keys is None:
+        assert all(k not in metrics for k in mapping)
+    else:
+        for k, v in expect_keys.items():
+            assert metrics.get(k) == v
+
+
+def test_metrics_result_mode_conflict_error():
+    metric = MappingMetric({"map": 3}, metrics_result_mode="named")
+    engine = Engine(lambda e, x: 0)
+    metric.attach(engine, "map")
+    with pytest.raises(ValueError):
+        engine.run([0], max_epochs=1)

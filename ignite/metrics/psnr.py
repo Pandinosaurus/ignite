@@ -1,4 +1,4 @@
-from typing import Callable, Sequence, Union
+from collections.abc import Callable, Sequence
 
 import torch
 
@@ -9,13 +9,15 @@ __all__ = ["PSNR"]
 
 
 class PSNR(Metric):
-    r"""Computes average `Peak signal-to-noise ratio (PSNR) <https://en.wikipedia.org/wiki/Peak_signal-to-noise_ratio>`_.
+    r"""Computes average
+    `Peak signal-to-noise ratio (PSNR) <https://en.wikipedia.org/wiki/Peak_signal-to-noise_ratio>`_.
 
     .. math::
         \text{PSNR}(I, J) = 10 * \log_{10}\left(\frac{ MAX_{I}^2 }{ \text{ MSE } }\right)
 
     where :math:`\text{MSE}` is `mean squared error <https://en.wikipedia.org/wiki/Mean_squared_error>`_.
 
+    - ``update`` must receive output of the form ``(y_pred, y)``.
     - `y_pred` and `y` **must** have (batch_size, ...) shape.
     - `y_pred` and `y` **must** have same dtype and same shape.
 
@@ -28,11 +30,21 @@ class PSNR(Metric):
         device: specifies which device updates are accumulated on.
             Setting the metric’s device to be the same as your update arguments ensures
             the update method is non-blocking. By default, CPU.
+        skip_unrolling: specifies whether output should be unrolled before being fed to update method. Should be
+            true for multi-output model, for example, if ``y_pred`` contains multi-output as ``(y_pred_a, y_pred_b)``
+            Alternatively, ``output_transform`` can be used to handle this.
 
     Examples:
         To use with ``Engine`` and ``process_function``, simply attach the metric instance to the engine.
         The output of the engine's ``process_function`` needs to be in format of
-        ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y, ...}``.
+        ``(y_pred, y)`` or ``{'y_pred': y_pred, 'y': y, ...}``. If not, ``output_transform`` can be added
+        to the metric to transform the output into the form expected by the metric.
+
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`,
+        visit :ref:`attach-engine`.
+
+        .. include:: defaults.rst
+            :start-after: :orphan:
 
         .. testcode::
 
@@ -70,15 +82,21 @@ class PSNR(Metric):
             16.7027966...
 
     .. versionadded:: 0.4.3
+
+    .. versionchanged:: 0.5.1
+        ``skip_unrolling`` argument is added.
     """
+
+    _state_dict_all_req_keys = ("_sum_of_batchwise_psnr", "_num_examples")
 
     def __init__(
         self,
-        data_range: Union[int, float],
+        data_range: int | float,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
+        skip_unrolling: bool = False,
     ):
-        super().__init__(output_transform=output_transform, device=device)
+        super().__init__(output_transform=output_transform, device=device, skip_unrolling=skip_unrolling)
         self.data_range = data_range
 
     def _check_shape_dtype(self, output: Sequence[torch.Tensor]) -> None:
@@ -95,7 +113,7 @@ class PSNR(Metric):
 
     @reinit__is_reduced
     def reset(self) -> None:
-        self._sum_of_batchwise_psnr = torch.tensor(0.0, dtype=torch.float64, device=self._device)
+        self._sum_of_batchwise_psnr = torch.tensor(0.0, dtype=self._double_dtype, device=self._device)
         self._num_examples = 0
 
     @reinit__is_reduced
@@ -104,14 +122,14 @@ class PSNR(Metric):
         y_pred, y = output[0].detach(), output[1].detach()
 
         dim = tuple(range(1, y.ndim))
-        mse_error = torch.pow(y_pred.double() - y.view_as(y_pred).double(), 2).mean(dim=dim)
-        self._sum_of_batchwise_psnr += torch.sum(10.0 * torch.log10(self.data_range ** 2 / (mse_error + 1e-10))).to(
+        mse_error = torch.pow(y_pred.to(self._double_dtype) - y.view_as(y_pred).to(self._double_dtype), 2).mean(dim=dim)
+        self._sum_of_batchwise_psnr += torch.sum(10.0 * torch.log10(self.data_range**2 / (mse_error + 1e-10))).to(
             device=self._device
         )
         self._num_examples += y.shape[0]
 
     @sync_all_reduce("_sum_of_batchwise_psnr", "_num_examples")
-    def compute(self) -> torch.Tensor:
+    def compute(self) -> float:
         if self._num_examples == 0:
             raise NotComputableError("PSNR must have at least one example before it can be computed.")
-        return self._sum_of_batchwise_psnr / self._num_examples
+        return (self._sum_of_batchwise_psnr / self._num_examples).item()

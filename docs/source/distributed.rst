@@ -15,7 +15,7 @@ Distributed launcher and `auto` helpers
 
 We provide a context manager to simplify the code of distributed configuration setup for all above supported backends.
 In addition, methods like :meth:`~ignite.distributed.auto.auto_model`, :meth:`~ignite.distributed.auto.auto_optim` and
-:meth:`~ignite.distributed.auto.auto_dataloader` helps to adapt in a transparent way provided model, optimizer and data
+:meth:`~ignite.distributed.auto.auto_dataloader` help to adapt in a transparent way provided model, optimizer and data
 loaders to existing configuration:
 
 .. code-block:: python
@@ -37,26 +37,26 @@ loaders to existing configuration:
         # ...
         optimizer = optim.SGD(model.parameters(), lr=0.01)
         optimizer = idist.auto_optim(optimizer)
-        # optimizer is itself, except XLA configuration and overrides `step()` method.
-        # User can safely call `optimizer.step()` (behind `xm.optimizer_step(optimizier)` is performed)
+        # The optimizer remains unchanged, except for XLA configurations where the step() method is overridden.
+        # User can safely call `optimizer.step()` (behind `xm.optimizer_step(optimizer)` is performed)
 
 
     backend = "nccl"  # torch native distributed configuration on multiple GPUs
     # backend = "xla-tpu"  # XLA TPUs distributed configuration
     # backend = None  # no distributed configuration
-    # 
+    #
     # dist_configs = {'nproc_per_node': 4}  # Use specified distributed configuration if launch as python main.py
     # dist_configs["start_method"] = "fork"  # Add start_method as "fork" if using Jupyter Notebook
     with idist.Parallel(backend=backend, **dist_configs) as parallel:
         parallel.run(training, config, a=1, b=2)
 
 Above code may be executed with `torch.distributed.launch`_ tool or by python and specifying distributed configuration
-in the code. For more details, please, see :class:`~ignite.distributed.launcher.Parallel`,
+in the code. For more details, please see :class:`~ignite.distributed.launcher.Parallel`,
 :meth:`~ignite.distributed.auto.auto_model`, :meth:`~ignite.distributed.auto.auto_optim` and
 :meth:`~ignite.distributed.auto.auto_dataloader`.
 
 Complete example of CIFAR10 training can be found
-`here <https://github.com/pytorch/ignite/tree/master/examples/contrib/cifar10>`_.
+`here <https://github.com/pytorch/ignite/tree/master/examples/cifar10>`_.
 
 
 .. _torch.distributed.launch: https://pytorch.org/docs/stable/distributed.html#launch-utility

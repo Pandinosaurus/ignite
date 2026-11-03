@@ -2,16 +2,21 @@
 
 <!-- ![Ignite Logo](assets/logo/ignite_logo_mixed.svg) -->
 
-<img src="assets/logo/ignite_logo_mixed.svg" width=512>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/pytorch/ignite/master/assets/logo/ignite_logo_mixed_light.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/pytorch/ignite/master/assets/logo/ignite_logo_mixed.svg">
+  <img src="https://raw.githubusercontent.com/pytorch/ignite/master/assets/logo/ignite_logo_mixed.svg"
+       alt="PyTorch-Ignite logo"
+       width="512">
+</picture>
 
 <!-- [![image](https://travis-ci.com/pytorch/ignite.svg?branch=master)](https://travis-ci.com/pytorch/ignite) -->
 
-| ![image](https://img.shields.io/badge/-Tests:-black?style=flat-square) [![image](https://github.com/pytorch/ignite/workflows/Run%20unit%20tests/badge.svg)](https://github.com/pytorch/ignite/actions) [![image](https://img.shields.io/badge/-GPU%20tests-black?style=flat-square)](https://app.circleci.com/pipelines/github/pytorch/ignite?branch=master)[![image](https://circleci.com/gh/pytorch/ignite.svg?style=svg)](https://app.circleci.com/pipelines/github/pytorch/ignite?branch=master) [![image](https://codecov.io/gh/pytorch/ignite/branch/master/graph/badge.svg)](https://codecov.io/gh/pytorch/ignite) [![image](https://img.shields.io/badge/dynamic/json.svg?label=docs&url=https%3A%2F%2Fpypi.org%2Fpypi%2Fpytorch-ignite%2Fjson&query=%24.info.version&colorB=brightgreen&prefix=v)](https://pytorch.org/ignite/index.html) |
+| ![image](https://img.shields.io/badge/-Tests:-black?style=flat-square) [![image](https://github.com/pytorch/ignite/actions/workflows/unit-tests.yml/badge.svg?branch=master)](https://github.com/pytorch/ignite/actions/workflows/unit-tests.yml) [![image](https://github.com/pytorch/ignite/actions/workflows/gpu-tests.yml/badge.svg)](https://github.com/pytorch/ignite/actions/workflows/gpu-tests.yml) [![image](https://codecov.io/gh/pytorch/ignite/branch/master/graph/badge.svg)](https://codecov.io/gh/pytorch/ignite) [![image](https://img.shields.io/badge/dynamic/json.svg?label=docs&url=https%3A%2F%2Fpypi.org%2Fpypi%2Fpytorch-ignite%2Fjson&query=%24.info.version&colorB=brightgreen&prefix=v)](https://pytorch.org/ignite/index.html) |
 |:---
-| ![image](https://img.shields.io/badge/-Stable%20Releases:-black?style=flat-square) [![image](https://anaconda.org/pytorch/ignite/badges/version.svg)](https://anaconda.org/pytorch/ignite) [![image](https://anaconda.org/pytorch/ignite/badges/downloads.svg)](https://anaconda.org/pytorch/ignite) [![image](https://img.shields.io/badge/dynamic/json.svg?label=PyPI&url=https%3A%2F%2Fpypi.org%2Fpypi%2Fpytorch-ignite%2Fjson&query=%24.info.version&colorB=brightgreen&prefix=v)](https://pypi.org/project/pytorch-ignite/) [![image](https://pepy.tech/badge/pytorch-ignite)](https://pepy.tech/project/pytorch-ignite) |
+| ![image](https://img.shields.io/badge/-Stable%20Releases:-black?style=flat-square) [![image](https://anaconda.org/pytorch/ignite/badges/version.svg)](https://anaconda.org/pytorch/ignite) ・ [![image](https://img.shields.io/badge/dynamic/json.svg?label=PyPI&url=https%3A%2F%2Fpypi.org%2Fpypi%2Fpytorch-ignite%2Fjson&query=%24.info.version&colorB=brightgreen&prefix=v)](https://pypi.org/project/pytorch-ignite/) [![image](https://static.pepy.tech/badge/pytorch-ignite)](https://pepy.tech/project/pytorch-ignite) ・ [![image](https://img.shields.io/badge/docker-hub-blue)](https://hub.docker.com/u/pytorchignite) |
 | ![image](https://img.shields.io/badge/-Nightly%20Releases:-black?style=flat-square) [![image](https://anaconda.org/pytorch-nightly/ignite/badges/version.svg)](https://anaconda.org/pytorch-nightly/ignite) [![image](https://img.shields.io/badge/PyPI-pre%20releases-brightgreen)](https://pypi.org/project/pytorch-ignite/#history)|
-| ![image](https://img.shields.io/badge/-Features:-black?style=flat-square) [![image](https://img.shields.io/badge/docker-hub-blue)](https://hub.docker.com/u/pytorchignite) [![image](https://img.shields.io/badge/Optuna-integrated-blue)](https://optuna.org) [![image](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black) |
-| ![image](https://img.shields.io/badge/-Community:-black?style=flat-square) [![Twitter](https://img.shields.io/badge/news-twitter-blue)](https://twitter.com/pytorch_ignite) [![facebook](https://img.shields.io/badge/news-facebook-blue)](https://www.facebook.com/PyTorch-Ignite-Community-105837321694508) [![numfocus](https://img.shields.io/badge/NumFOCUS-affiliated%20project-green)](https://numfocus.org/sponsored-projects/affiliated-projects) [![discord](https://img.shields.io/badge/chat-discord-blue?logo=discord)](https://discord.gg/djZtm3EmKj) |
+| ![image](https://img.shields.io/badge/-Community:-black?style=flat-square) [![Twitter](https://img.shields.io/badge/news-twitter-blue)](https://twitter.com/pytorch_ignite) [![discord](https://img.shields.io/badge/chat-discord-blue?logo=discord)](https://discord.gg/djZtm3EmKj) [![numfocus](https://img.shields.io/badge/NumFOCUS-affiliated%20project-green)](https://numfocus.org/sponsored-projects/affiliated-projects) |
 | ![image](https://img.shields.io/badge/-Supported_PyTorch/Python_versions:-black?style=flat-square) [![link](https://img.shields.io/badge/-check_here-blue)](https://github.com/pytorch/ignite/actions?query=workflow%3A%22PyTorch+version+tests%22)|
 
 </div>
@@ -24,7 +29,7 @@ Ignite is a high-level library to help with training and evaluating neural netwo
 
 <a href="https://colab.research.google.com/github/pytorch/ignite/blob/master/assets/tldr/teaser.ipynb">
  <img alt="PyTorch-Ignite teaser"
-      src="assets/tldr/pytorch-ignite-teaser.gif"
+      src="https://raw.githubusercontent.com/pytorch/ignite/master/assets/tldr/pytorch-ignite-teaser.gif"
       width=532>
 </a>
 
@@ -242,7 +247,7 @@ def function_before_backprop(engine):
 ## Out-of-the-box metrics
 
 - [Metrics](https://pytorch.org/ignite/metrics.html#complete-list-of-metrics) for various tasks:
-  Precision, Recall, Accuracy, Confusion Matrix, IoU etc, ~20 [regression metrics](https://pytorch.org/ignite/contrib/metrics.html#regression-metrics).
+  Precision, Recall, Accuracy, Confusion Matrix, IoU etc, ~20 [regression metrics](https://pytorch.org/ignite/metrics.html#complete-list-of-metrics).
 
 - Users can also [compose their metrics](https://pytorch.org/ignite/metrics.html#metric-arithmetics) with ease from
   existing ones using arithmetic operations or torch methods.
@@ -316,13 +321,15 @@ List of available pre-built images
 </summary>
 
 Base
-- `pytorchignite/base:latest` 
+
+- `pytorchignite/base:latest`
 - `pytorchignite/apex:latest`
 - `pytorchignite/hvd-base:latest`
-- `pytorchignite/hvd-apex:latest` 
+- `pytorchignite/hvd-apex:latest`
 - `pytorchignite/msdp-apex:latest`
 
 Vision:
+
 - `pytorchignite/vision:latest`
 - `pytorchignite/hvd-vision:latest`
 - `pytorchignite/apex-vision:latest`
@@ -330,10 +337,11 @@ Vision:
 - `pytorchignite/msdp-apex-vision:latest`
 
 NLP:
+
 - `pytorchignite/nlp:latest`
 - `pytorchignite/hvd-nlp:latest`
-- `pytorchignite/apex-nlp:latest` 
-- `pytorchignite/hvd-apex-nlp:latest` 
+- `pytorchignite/apex-nlp:latest`
+- `pytorchignite/hvd-apex-nlp:latest`
 - `pytorchignite/msdp-apex-nlp:latest`
 
 </details>
@@ -346,8 +354,8 @@ For more details, see [here](docker).
 
 Few pointers to get you started:
 
-- [Quick Start Guide: Essentials of getting a project up and running](https://pytorch.org/ignite/quickstart.html)
-- [Concepts of the library: Engine, Events & Handlers, State, Metrics](https://pytorch.org/ignite/concepts.html)
+- [Quick Start Guide: Essentials of getting a project up and running](https://pytorch-ignite.ai/tutorials/beginner/01-getting-started/)
+- [Concepts of the library: Engine, Events & Handlers, State, Metrics](https://pytorch-ignite.ai/concepts/)
 - Full-featured template examples (coming soon)
 
 <!-- ############################################################################################################### -->
@@ -378,8 +386,7 @@ Few pointers to get you started:
 
 ## Tutorials
 
-- [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pytorch/ignite/blob/master/examples/notebooks/TextCNN.ipynb) [Text Classification using Convolutional Neural
-  Networks](https://github.com/pytorch/ignite/blob/master/examples/notebooks/TextCNN.ipynb)
+- [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pytorch/ignite/blob/master/examples/notebooks/TextTransformers.ipynb) [Fine-Tuning a Transformer (DistilBERT) for Text Classification with Ignite](https://github.com/pytorch/ignite/blob/master/examples/notebooks/TextTransformers.ipynb)
 - [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pytorch/ignite/blob/master/examples/notebooks/VAE.ipynb) [Variational Auto
   Encoders](https://github.com/pytorch/ignite/blob/master/examples/notebooks/VAE.ipynb)
 - [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pytorch/ignite/blob/master/examples/notebooks/FashionMNIST.ipynb) [Convolutional Neural Networks for Classifying Fashion-MNIST
@@ -395,10 +402,10 @@ Few pointers to get you started:
 - [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pytorch/ignite/blob/master/examples/notebooks/FastaiLRFinder_MNIST.ipynb) [Basic example of LR finder on
   MNIST](https://github.com/pytorch/ignite/blob/master/examples/notebooks/FastaiLRFinder_MNIST.ipynb)
 - [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pytorch/ignite/blob/master/examples/notebooks/Cifar100_bench_amp.ipynb) [Benchmark mixed precision training on Cifar100:
-  torch.cuda.amp vs nvidia/apex](https://github.com/pytorch/ignite/blob/master/examples/notebooks/Cifar100_bench_amp.ipynb)
+  torch.amp vs nvidia/apex](https://github.com/pytorch/ignite/blob/master/examples/notebooks/Cifar100_bench_amp.ipynb)
 - [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pytorch/ignite/blob/master/examples/notebooks/MNIST_on_TPU.ipynb) [MNIST training on a single
   TPU](https://github.com/pytorch/ignite/blob/master/examples/notebooks/MNIST_on_TPU.ipynb)
-- [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1E9zJrptnLJ_PKhmaP5Vhb6DTVRvyrKHx) [CIFAR10 Training on multiple TPUs](https://github.com/pytorch/ignite/tree/master/examples/contrib/cifar10)
+- [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1E9zJrptnLJ_PKhmaP5Vhb6DTVRvyrKHx) [CIFAR10 Training on multiple TPUs](https://github.com/pytorch/ignite/tree/master/examples/cifar10)
 - [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pytorch/ignite/blob/master/examples/notebooks/HandlersTimeProfiler_MNIST.ipynb) [Basic example of handlers
   time profiling on MNIST training example](https://github.com/pytorch/ignite/blob/master/examples/notebooks/HandlersTimeProfiler_MNIST.ipynb)
 
@@ -417,8 +424,8 @@ Features:
 ## Code-Generator application
 
 The easiest way to create your training scripts with PyTorch-Ignite:
-- https://code-generator.pytorch-ignite.ai/
 
+- https://code-generator.pytorch-ignite.ai/
 
 <!-- ############################################################################################################### -->
 
@@ -503,7 +510,7 @@ Blog articles, tutorials, books
 - [The Hero Rises: Build Your Own SSD](https://allegro.ai/blog/the-hero-rises-build-your-own-ssd/)
 - [Using Optuna to Optimize PyTorch Ignite Hyperparameters](https://medium.com/pytorch/using-optuna-to-optimize-pytorch-ignite-hyperparameters-626ffe6d4783)
 - [PyTorch Ignite - Classifying Tiny ImageNet with EfficientNet](https://towardsdatascience.com/pytorch-ignite-classifying-tiny-imagenet-with-efficientnet-e5b1768e5e8f)
- 
+
 </details>
 
 <details>
@@ -515,6 +522,8 @@ Toolkits
 - [Project MONAI - AI Toolkit for Healthcare Imaging](https://github.com/Project-MONAI/MONAI)
 - [DeepSeismic - Deep Learning for Seismic Imaging and Interpretation](https://github.com/microsoft/seismic-deeplearning)
 - [Nussl - a flexible, object-oriented Python audio source separation library](https://github.com/nussl/nussl)
+- [PyTorch Adapt - A fully featured and modular domain adaptation library](https://github.com/KevinMusgrave/pytorch-adapt)
+- [gnina-torch: PyTorch implementation of GNINA scoring function](https://github.com/RMeli/gnina-torch)
 
 </details>
 
@@ -532,6 +541,7 @@ Others
 - [Logging with ChainerUI](https://chainerui.readthedocs.io/en/latest/reference/module.html#external-library-support)
 - [FixMatch experiments in PyTorch and Ignite (CTA dataaug policy)](https://github.com/vfdev-5/FixMatch-pytorch)
 - [Kaggle Birdcall Identification Competition: 1st place solution](https://github.com/ryanwongsa/kaggle-birdsong-recognition)
+- [Logging with Aim - An open-source experiment tracker](https://aimstack.readthedocs.io/en/latest/quick_start/integrations.html#integration-with-pytorch-ignite)
 
 </details>
 
@@ -565,7 +575,7 @@ If you use PyTorch-Ignite in a scientific publication, we would appreciate citat
 # About the team & Disclaimer
 
 PyTorch-Ignite is a [NumFOCUS Affiliated Project](https://www.numfocus.org/), operated and maintained by volunteers in the PyTorch community in their capacities as individuals
-(and not as representatives of their employers). See the ["About us"](https://pytorch.org/ignite/master/about.html)
+(and not as representatives of their employers). See the ["About us"](https://pytorch-ignite.ai/about/community/#about-us)
 page for a list of core contributors. For usage questions and issues, please see the various channels
 [here](#communication). For all other questions and inquiries, please send an email
 to contact@pytorch-ignite.ai.

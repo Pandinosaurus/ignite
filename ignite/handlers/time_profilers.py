@@ -1,6 +1,7 @@
 import functools
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Mapping, Sequence, Tuple, Union, cast
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, cast
 
 import torch
 
@@ -40,6 +41,7 @@ class BasicTimeProfiler:
         Events.TERMINATE,
         Events.TERMINATE_SINGLE_EPOCH,
         Events.DATALOADER_STOP_ITERATION,
+        Events.INTERRUPT,
     ]
 
     def __init__(self) -> None:
@@ -49,7 +51,7 @@ class BasicTimeProfiler:
 
         self.dataflow_times = torch.zeros(1)
         self.processing_times = torch.zeros(1)
-        self.event_handlers_times = {}  # type: Dict[EventEnum, torch.Tensor]
+        self.event_handlers_times: dict[EventEnum, torch.Tensor] = {}
 
         self._events = [
             Events.EPOCH_STARTED,
@@ -221,22 +223,24 @@ class BasicTimeProfiler:
             engine._event_handlers[Events.STARTED].insert(0, (self._as_first_started, (engine,), {}))
 
     @staticmethod
-    def _compute_basic_stats(data: torch.Tensor) -> Dict[str, Union[str, float, Tuple[Union[float], Union[float]]]]:
+    def _compute_basic_stats(data: torch.Tensor) -> dict[str, str | float | tuple[float, float]]:
         # compute on non-zero data:
         data = data[data > 0]
-        out = [
+        out: list[tuple[str, str | float | tuple[float, float]]] = [
             ("total", torch.sum(data).item() if len(data) > 0 else "not yet triggered")
-        ]  # type: List[Tuple[str, Union[str, float, Tuple[Union[float], Union[float]]]]]
+        ]
         if len(data) > 1:
-            out += [
-                ("min/index", (torch.min(data).item(), torch.argmin(data).item())),
-                ("max/index", (torch.max(data).item(), torch.argmax(data).item())),
-                ("mean", torch.mean(data).item()),
-                ("std", torch.std(data).item()),
-            ]
+            out.extend(
+                [
+                    ("min/index", (torch.min(data).item(), torch.argmin(data).item())),
+                    ("max/index", (torch.max(data).item(), torch.argmax(data).item())),
+                    ("mean", torch.mean(data).item()),
+                    ("std", torch.std(data).item()),
+                ]
+            )
         return OrderedDict(out)
 
-    def get_results(self) -> Dict[str, Dict[str, Any]]:
+    def get_results(self) -> dict[str, dict[str, Any]]:
         """
         Method to fetch the aggregated profiler results after the engine is run
 
@@ -245,23 +249,24 @@ class BasicTimeProfiler:
             results = profiler.get_results()
 
         """
-        total_eh_time = sum(
+        total_eh_time: int | torch.Tensor = sum(
             [(self.event_handlers_times[e]).sum() for e in Events if e not in self.events_to_ignore]
-        )  # type: Union[int, torch.Tensor]
+        )
+        # pyrefly: ignore [no-matching-overload]
         event_handlers_stats = dict(
             [
                 (str(e.name).replace(".", "_"), self._compute_basic_stats(self.event_handlers_times[e]))
                 for e in Events
                 if e not in self.events_to_ignore
             ]
-            + [("total_time", total_eh_time)]  # type: ignore[list-item]
+            + [("total_time", total_eh_time)]
         )
 
         return OrderedDict(
             [
                 ("processing_stats", self._compute_basic_stats(self.processing_times)),
                 ("dataflow_stats", self._compute_basic_stats(self.dataflow_times)),
-                ("event_handlers_stats", event_handlers_stats,),
+                ("event_handlers_stats", event_handlers_stats),
                 (
                     "event_handlers_names",
                     {str(e.name).replace(".", "_") + "_names": v for e, v in self.event_handlers_names.items()},
@@ -292,7 +297,7 @@ class BasicTimeProfiler:
         try:
             import pandas as pd
         except ImportError:
-            raise RuntimeError("Need pandas to write results as files")
+            raise ModuleNotFoundError("Need pandas to write results as files")
 
         iters_per_epoch = self.total_num_iters // self.max_epochs
 
@@ -331,6 +336,7 @@ class BasicTimeProfiler:
 
         results_df = pd.DataFrame(
             data=results_dump,
+            # pyrefly: ignore [bad-argument-type]
             columns=[
                 "epoch",
                 "iteration",
@@ -349,7 +355,7 @@ class BasicTimeProfiler:
         results_df.to_csv(output_path, index=False)
 
     @staticmethod
-    def print_results(results: Dict) -> str:
+    def print_results(results: dict) -> str:
         """
         Method to print the aggregated results from the profiler
 
@@ -397,7 +403,7 @@ class BasicTimeProfiler:
 
         """
 
-        def to_str(v: Union[str, tuple]) -> str:
+        def to_str(v: str | tuple | int | float) -> str:
             if isinstance(v, str):
                 return v
             elif isinstance(v, tuple):
@@ -409,12 +415,13 @@ class BasicTimeProfiler:
             return out
 
         others = {
-            k: odict_to_str(v) if isinstance(v, OrderedDict) else v for k, v in results["event_handlers_stats"].items()
+            k: odict_to_str(v) if isinstance(v, OrderedDict) else to_str(v)
+            for k, v in results["event_handlers_stats"].items()
         }
 
         others.update(results["event_handlers_names"])
 
-        output_message = """
+        output_message: str = """
  ----------------------------------------------------
 | Time profiling stats (in seconds):                 |
  ----------------------------------------------------
@@ -427,7 +434,7 @@ Dataflow:
 {dataflow_stats}
 
 Event handlers:
-{total_time:.5f}
+{total_time}
 
 - Events.STARTED: {STARTED_names}
 {STARTED}
@@ -490,16 +497,16 @@ class HandlersTimeProfiler:
         self._processing_timer = Timer()
         self._event_handlers_timer = Timer()
 
-        self.dataflow_times = []  # type: List[float]
-        self.processing_times = []  # type: List[float]
-        self.event_handlers_times = {}  # type: Dict[EventEnum, Dict[str, List[float]]]
+        self.dataflow_times: list[float] = []
+        self.processing_times: list[float] = []
+        self.event_handlers_times: dict[str | EventEnum, dict[str, list[float]]] = {}
 
     @staticmethod
     def _get_callable_name(handler: Callable) -> str:
         # get name of the callable handler
         return getattr(handler, "__qualname__", handler.__class__.__name__)
 
-    def _create_wrapped_handler(self, handler: Callable, event: EventEnum) -> Callable:
+    def _create_wrapped_handler(self, handler: Callable, event: str | EventEnum) -> Callable:
         @functools.wraps(handler)
         def _timeit_handler(*args: Any, **kwargs: Any) -> None:
             self._event_handlers_timer.reset()
@@ -524,7 +531,7 @@ class HandlersTimeProfiler:
         t = self._dataflow_timer.value()
         self.dataflow_times.append(t)
 
-    def _reset(self, event_handlers_names: Mapping[EventEnum, List[str]]) -> None:
+    def _reset(self, event_handlers_names: Mapping[str | EventEnum, list[str]]) -> None:
         # reset the variables used for profiling
         self.dataflow_times = []
         self.processing_times = []
@@ -585,7 +592,7 @@ class HandlersTimeProfiler:
         if not engine.has_event_handler(self._as_first_started):
             engine._event_handlers[Events.STARTED].insert(0, (self._as_first_started, (engine,), {}))
 
-    def get_results(self) -> List[List[Union[str, float]]]:
+    def get_results(self) -> list[list[str | float | tuple[str | float, str | float]]]:
         """
         Method to fetch the aggregated profiler results after the engine is run
 
@@ -601,19 +608,17 @@ class HandlersTimeProfiler:
                 for h in self.event_handlers_times[e]
             ]
         )
-        total_eh_time = round(float(total_eh_time), 5,)
+        total_eh_time = round(float(total_eh_time), 5)
 
-        def compute_basic_stats(
-            times: Union[Sequence, torch.Tensor]
-        ) -> List[Union[str, float, Tuple[Union[str, float], Union[str, float]]]]:
+        def compute_basic_stats(times: Sequence | torch.Tensor) -> list[str | float | tuple[str | float, str | float]]:
             data = torch.as_tensor(times, dtype=torch.float32)
             # compute on non-zero data:
             data = data[data > 0]
-            total = round(torch.sum(data).item(), 5) if len(data) > 0 else "not triggered"  # type: Union[str, float]
-            min_index = ("None", "None")  # type: Tuple[Union[str, float], Union[str, float]]
-            max_index = ("None", "None")  # type: Tuple[Union[str, float], Union[str, float]]
-            mean = "None"  # type: Union[str, float]
-            std = "None"  # type: Union[str, float]
+            total: str | float = round(torch.sum(data).item(), 5) if len(data) > 0 else "not triggered"
+            min_index: tuple[str | float, str | float] = ("None", "None")
+            max_index: tuple[str | float, str | float] = ("None", "None")
+            mean: str | float = "None"
+            std: str | float = "None"
             if len(data) > 0:
                 min_index = (round(torch.min(data).item(), 5), torch.argmin(data).item())
                 max_index = (round(torch.max(data).item(), 5), torch.argmax(data).item())
@@ -660,7 +665,7 @@ class HandlersTimeProfiler:
         try:
             import pandas as pd
         except ImportError:
-            raise RuntimeError("Need pandas to write results as files")
+            raise ModuleNotFoundError("Need pandas to write results as files")
 
         processing_stats = torch.tensor(self.processing_times, dtype=torch.float32)
         dataflow_stats = torch.tensor(self.dataflow_times, dtype=torch.float32)
@@ -681,13 +686,14 @@ class HandlersTimeProfiler:
         # pad all tensors to have same length
         cols = [torch.nn.functional.pad(x, pad=(0, max_len - x.numel()), mode="constant", value=0) for x in cols]
 
-        results_dump = torch.stack(cols, dim=1,).numpy()
+        results_dump = torch.stack(cols, dim=1).numpy()
 
-        results_df = pd.DataFrame(data=results_dump, columns=headers,)
+        # pyrefly: ignore [bad-argument-type]
+        results_df = pd.DataFrame(data=results_dump, columns=headers)
         results_df.to_csv(output_path, index=False)
 
     @staticmethod
-    def print_results(results: List[List[Union[str, float]]]) -> None:
+    def print_results(results: list[list[str | float]]) -> None:
         """
         Method to print the aggregated results from the profiler
 

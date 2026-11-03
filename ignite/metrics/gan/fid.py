@@ -1,10 +1,10 @@
 import warnings
-from distutils.version import LooseVersion
-from typing import Callable, Optional, Sequence, Union
+from collections.abc import Callable, Sequence
 
 import torch
+from packaging.version import Version
 
-from ignite.metrics.gan.utils import InceptionModel, _BaseInceptionMetric
+from ignite.metrics.gan.utils import _BaseInceptionMetric, InceptionModel
 from ignite.metrics.metric import reinit__is_reduced, sync_all_reduce
 
 __all__ = [
@@ -12,32 +12,37 @@ __all__ = [
 ]
 
 
+if Version(torch.__version__) <= Version("1.7.0"):
+    torch_outer = torch.ger
+else:
+    torch_outer = torch.outer
+
+
 def fid_score(
     mu1: torch.Tensor, mu2: torch.Tensor, sigma1: torch.Tensor, sigma2: torch.Tensor, eps: float = 1e-6
 ) -> float:
-
     try:
         import numpy as np
     except ImportError:
-        raise RuntimeError("fid_score requires numpy to be installed.")
+        raise ModuleNotFoundError("fid_score requires numpy to be installed.")
 
     try:
         import scipy.linalg
     except ImportError:
-        raise RuntimeError("fid_score requires scipy to be installed.")
+        raise ModuleNotFoundError("fid_score requires scipy to be installed.")
 
-    mu1, mu2 = mu1.cpu(), mu2.cpu()
-    sigma1, sigma2 = sigma1.cpu(), sigma2.cpu()
+    mu1, mu2 = mu1.detach().cpu(), mu2.detach().cpu()
+    sigma1, sigma2 = sigma1.detach().cpu(), sigma2.detach().cpu()
 
     diff = mu1 - mu2
 
     # Product might be almost singular
-    covmean, _ = scipy.linalg.sqrtm(sigma1.mm(sigma2), disp=False)
+    covmean = scipy.linalg.sqrtm(sigma1.mm(sigma2).numpy())
     # Numerical error might give slight imaginary component
     if np.iscomplexobj(covmean):
         if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
             m = np.max(np.abs(covmean.imag))
-            raise ValueError("Imaginary component {}".format(m))
+            raise ValueError(f"Imaginary component {m}")
         covmean = covmean.real
 
     tr_covmean = np.trace(covmean)
@@ -57,17 +62,17 @@ class FID(_BaseInceptionMetric):
     where :math:`\mu_1` and :math:`\sigma_1` refer to the mean and covariance of the train data and
     :math:`\mu_2` and :math:`\sigma_2` refer to the mean and covariance of the test data.
 
-    More details can be found in `Heusel et al. 2002`__
+    More details can be found in `Heusel et al. 2017`__
 
-    __ https://arxiv.org/pdf/1706.08500.pdf
+    __ https://arxiv.org/abs/1706.08500
 
-    In addition, a faster and online computation approach can be found in `Chen et al. 2014`__
+    In addition, a faster and online computation approach can be found in `Mathiasen et al. 2020`__
 
-    __ https://arxiv.org/pdf/2009.14075.pdf
+    __ https://arxiv.org/abs/2009.14075
 
     Remark:
 
-        This implementation is inspired by pytorch_fid package which can be found `here`__
+        This implementation is inspired by `pytorch_fid` package which can be found `here`__
 
         __ https://github.com/mseitzer/pytorch-fid
 
@@ -77,12 +82,13 @@ class FID(_BaseInceptionMetric):
 
     Args:
         num_features: number of features predicted by the model or the reduced feature vector of the image.
-            Default value is 2048.
+            Default value is 1000.
         feature_extractor: a torch Module for extracting the features from the input data.
             It returns a tensor of shape (batch_size, num_features).
             If neither ``num_features`` nor ``feature_extractor`` are defined, by default we use an ImageNet
-            pretrained Inception Model. If only ``num_features`` is defined but ``feature_extractor`` is not
-            defined, ``feature_extractor`` is assigned Identity Function.
+            pretrained Inception Model and use model's output logits as features.
+            If only ``num_features`` is defined but ``feature_extractor`` is not defined,
+            ``feature_extractor`` is assigned Identity Function.
             Please note that the model will be implicitly converted to device mentioned in the ``device``
             argument.
         output_transform: a callable that is used to transform the
@@ -96,14 +102,10 @@ class FID(_BaseInceptionMetric):
 
     Examples:
 
-        .. code-block:: python
+        For more information on how metric works with :class:`~ignite.engine.engine.Engine`, visit :ref:`attach-engine`.
 
-            metric = FID()
-            metric.attach(default_evaluator, "fid")
-            y_true = torch.rand(10, 3, 299, 299)
-            y_pred = torch.rand(10, 3, 299, 299)
-            state = default_evaluator.run([[y_pred, y_true]])
-            print(state.metrics["fid"])
+        .. include:: defaults.rst
+            :start-after: :orphan:
 
         .. testcode::
 
@@ -118,26 +120,68 @@ class FID(_BaseInceptionMetric):
 
             0.0
 
+    .. note::
+
+        The default `torchvision` model used is InceptionV3 pretrained on ImageNet.
+        This can lead to differences in results with `pytorch_fid`. To find comparable results,
+        the following model wrapper should be used:
+
+        .. code::
+
+            import torch.nn as nn
+
+            # wrapper class as feature_extractor
+            class WrapperInceptionV3(nn.Module):
+
+                def __init__(self, fid_incv3):
+                    super().__init__()
+                    self.fid_incv3 = fid_incv3
+
+                @torch.no_grad()
+                def forward(self, x):
+                    y = self.fid_incv3(x)
+                    y = y[0]
+                    y = y[:, :, 0, 0]
+                    return y
+
+            # use cpu rather than cuda to get comparable results
+            device = "cpu"
+
+            # pytorch_fid model
+            dims = 2048
+            block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
+            model = InceptionV3([block_idx]).to(device)
+
+            # wrapper model to pytorch_fid model
+            wrapper_model = WrapperInceptionV3(model)
+            wrapper_model.eval();
+
+            # comparable metric
+            pytorch_fid_metric = FID(num_features=dims, feature_extractor=wrapper_model)
+
+        Important, `pytorch_fid` results depend on the batch size if the device is `cuda`.
+
     .. versionadded:: 0.4.6
     """
 
+    _state_dict_all_req_keys = ("_num_examples", "_train_total", "_test_total", "_train_sigma", "_test_sigma")
+
     def __init__(
         self,
-        num_features: Optional[int] = None,
-        feature_extractor: Optional[torch.nn.Module] = None,
+        num_features: int | None = None,
+        feature_extractor: torch.nn.Module | None = None,
         output_transform: Callable = lambda x: x,
-        device: Union[str, torch.device] = torch.device("cpu"),
+        device: str | torch.device = torch.device("cpu"),
     ) -> None:
-
         try:
             import numpy as np  # noqa: F401
         except ImportError:
-            raise RuntimeError("This module requires numpy to be installed.")
+            raise ModuleNotFoundError("This module requires numpy to be installed.")
 
         try:
             import scipy  # noqa: F401
         except ImportError:
-            raise RuntimeError("This module requires scipy to be installed.")
+            raise ModuleNotFoundError("This module requires scipy to be installed.")
 
         if num_features is None and feature_extractor is None:
             num_features = 1000
@@ -145,7 +189,7 @@ class FID(_BaseInceptionMetric):
 
         self._eps = 1e-6
 
-        super(FID, self).__init__(
+        super().__init__(
             num_features=num_features,
             feature_extractor=feature_extractor,
             output_transform=output_transform,
@@ -154,49 +198,38 @@ class FID(_BaseInceptionMetric):
 
     @staticmethod
     def _online_update(features: torch.Tensor, total: torch.Tensor, sigma: torch.Tensor) -> None:
-
         total += features
-
-        if LooseVersion(torch.__version__) <= LooseVersion("1.7.0"):
-            sigma += torch.ger(features, features)
-        else:
-            sigma += torch.outer(features, features)
+        sigma += torch_outer(features, features)
 
     def _get_covariance(self, sigma: torch.Tensor, total: torch.Tensor) -> torch.Tensor:
         r"""
         Calculates covariance from mean and sum of products of variables
         """
 
-        if LooseVersion(torch.__version__) <= LooseVersion("1.7.0"):
-            sub_matrix = torch.ger(total, total)
-        else:
-            sub_matrix = torch.outer(total, total)
-
+        sub_matrix = torch_outer(total, total)
         sub_matrix = sub_matrix / self._num_examples
 
         return (sigma - sub_matrix) / (self._num_examples - 1)
 
     @reinit__is_reduced
     def reset(self) -> None:
-
         self._train_sigma = torch.zeros(
-            (self._num_features, self._num_features), dtype=torch.float64, device=self._device
+            (self._num_features, self._num_features), dtype=self._double_dtype, device=self._device
         )
 
-        self._train_total = torch.zeros(self._num_features, dtype=torch.float64, device=self._device)
+        self._train_total = torch.zeros(self._num_features, dtype=self._double_dtype, device=self._device)
 
         self._test_sigma = torch.zeros(
-            (self._num_features, self._num_features), dtype=torch.float64, device=self._device
+            (self._num_features, self._num_features), dtype=self._double_dtype, device=self._device
         )
 
-        self._test_total = torch.zeros(self._num_features, dtype=torch.float64, device=self._device)
+        self._test_total = torch.zeros(self._num_features, dtype=self._double_dtype, device=self._device)
         self._num_examples: int = 0
 
-        super(FID, self).reset()
+        super().reset()  # type: ignore
 
     @reinit__is_reduced
     def update(self, output: Sequence[torch.Tensor]) -> None:
-
         train, test = output
         train_features = self._extract_features(train)
         test_features = self._extract_features(test)
@@ -220,7 +253,6 @@ class FID(_BaseInceptionMetric):
 
     @sync_all_reduce("_num_examples", "_train_total", "_test_total", "_train_sigma", "_test_sigma")
     def compute(self) -> float:
-
         fid = fid_score(
             mu1=self._train_total / self._num_examples,
             mu2=self._test_total / self._num_examples,

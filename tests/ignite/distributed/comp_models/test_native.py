@@ -38,10 +38,7 @@ else:
         ),
         (
             "node[4-8,12,16-20,22,24-26]",
-            "node4,node5,node6,node7,node8,"
-            "node12,node16,node17,node18,"
-            "node19,node20,node22,node24,"
-            "node25,node26",
+            "node4,node5,node6,node7,node8,node12,node16,node17,node18,node19,node20,node22,node24,node25,node26",
         ),
         ("machine2-[02-4]vm1", "machine2-02vm1,machine2-03vm1,machine2-04vm1"),
         (
@@ -95,7 +92,6 @@ def test__native_dist_model():
 @pytest.mark.skipif(not dist.is_nccl_available(), reason="Skip if nccl not available")
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 def test__native_nccl_but_no_gpu(mock_gpu_is_not_available):
-
     with pytest.raises(RuntimeError, match=r"Nccl backend is required but no cuda capable devices"):
         _NativeDistModel(backend="nccl")
 
@@ -152,7 +148,6 @@ def test__native_dist_model_create_from_backend_bad_slurm_config():
 
 
 def _assert_model(model, true_conf):
-
     assert model.device() == torch.device(true_conf["device"])
     assert model.get_local_rank() == true_conf["local_rank"]
     assert model.get_rank() == true_conf["rank"]
@@ -188,7 +183,6 @@ def _test__native_dist_model_create_from_backend_no_dist(backend, true_device):
 
 
 def _test__native_dist_model_create_from_backend_dist(init_method, local_rank, rank, world_size, backend, true_device):
-
     import os
     from datetime import timedelta
 
@@ -234,7 +228,6 @@ def _test__native_dist_model_create_from_backend_dist(init_method, local_rank, r
 
 
 def _test__native_dist_model_create_from_backend_slurm(local_rank, rank, world_size, backend, true_device):
-
     import os
     from datetime import timedelta
 
@@ -292,7 +285,6 @@ def _test__native_dist_model_create_from_backend_slurm(local_rank, rank, world_s
 
 
 def _test__native_dist_model_create_from_context_no_local_rank():
-
     if "LOCAL_RANK" in os.environ:
         del os.environ["LOCAL_RANK"]
 
@@ -321,7 +313,6 @@ def _test__native_dist_model_create_from_context_env_local_rank(true_conf):
 
 
 def _test__native_dist_model_create_from_context_set_local_rank(true_conf):
-
     from ignite.distributed.comp_models.base import ComputationModel
 
     lrank = None
@@ -341,10 +332,10 @@ def _test__native_dist_model_create_from_context_set_local_rank(true_conf):
 
 
 def _test__native_dist_model_create_from_context_no_dist(true_backend, true_device):
-
     assert _NativeDistModel.create_from_context() is None
 
-    dist.init_process_group(true_backend, "tcp://0.0.0.0:2222", world_size=1, rank=0)
+    store = dist.TCPStore("0.0.0.0", 2222, world_size=1, is_master=True)
+    dist.init_process_group(true_backend, store=store, world_size=1, rank=0)
     dist.barrier()
 
     _test__native_dist_model_create_from_context_no_local_rank()
@@ -366,10 +357,11 @@ def _test__native_dist_model_create_from_context_no_dist(true_backend, true_devi
 
 
 def _test__native_dist_model_create_from_context_dist(local_rank, rank, world_size, true_backend, true_device):
-
     assert _NativeDistModel.create_from_context() is None
 
-    dist.init_process_group(true_backend, "tcp://0.0.0.0:2222", world_size=world_size, rank=rank)
+    is_master = rank == 0
+    store = dist.TCPStore("0.0.0.0", 2222, world_size=world_size, is_master=is_master)
+    dist.init_process_group(true_backend, store=store, world_size=world_size, rank=rank)
     dist.barrier()
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -408,7 +400,7 @@ def test__native_dist_model_create_no_dist_nccl(clean_env):
 
 
 @pytest.mark.distributed
-@pytest.mark.parametrize("init_method", [None, "tcp://0.0.0.0:22334", "FILE"])
+@pytest.mark.parametrize("init_method", [None, "FILE"])
 def test__native_dist_model_create_dist_gloo_1(init_method, get_fixed_dirname, local_rank, world_size):
     if init_method == "FILE":
         init_method = f"file://{get_fixed_dirname('native_dist_model_create_dist_gloo_1')}/shared"
@@ -422,7 +414,6 @@ def test__native_dist_model_create_dist_gloo_1(init_method, get_fixed_dirname, l
 
 @pytest.mark.distributed
 def test__native_dist_model_create_dist_gloo_2(local_rank, world_size):
-
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     _test__native_dist_model_create_from_context_dist(local_rank, local_rank, world_size, "gloo", device)
     _test__native_dist_model_create_from_backend_slurm(local_rank, local_rank, world_size, "gloo", device)
@@ -430,7 +421,7 @@ def test__native_dist_model_create_dist_gloo_2(local_rank, world_size):
 
 @pytest.mark.distributed
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
-@pytest.mark.parametrize("init_method", [None, "tcp://0.0.0.0:22334", "FILE"])
+@pytest.mark.parametrize("init_method", [None, "FILE"])
 def test__native_dist_model_create_dist_nccl_1(init_method, get_fixed_dirname, local_rank, world_size):
     if init_method == "FILE":
         init_method = f"file://{get_fixed_dirname('native_dist_model_create_dist_nccl_1')}/shared"
@@ -454,10 +445,11 @@ def test__native_dist_model_create_dist_nccl_2(local_rank, world_size):
 @pytest.mark.distributed
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Skip if less than 2 GPUs")
 def test__native_dist_model_warning_index_less_localrank(local_rank, world_size):
-
     assert _NativeDistModel.create_from_context() is None
 
-    dist.init_process_group("nccl", "tcp://0.0.0.0:2222", world_size=world_size, rank=local_rank)
+    is_master = local_rank == 0
+    store = dist.TCPStore("0.0.0.0", 2222, world_size=world_size, is_master=is_master)
+    dist.init_process_group("nccl", store=store, world_size=world_size, rank=local_rank)
     dist.barrier()
     # We deliberately incorrectly set cuda device to 0
     torch.cuda.set_device(0)
@@ -472,7 +464,7 @@ def test__native_dist_model_warning_index_less_localrank(local_rank, world_size)
     dist.destroy_process_group()
 
 
-def _test_dist_spawn_fn(local_rank, backend, world_size, device):
+def _test_dist_spawn_fn(local_rank, backend, world_size, device, **kwargs):
     from ignite.distributed.utils import _model
 
     assert dist.is_available() and dist.is_initialized()
@@ -484,12 +476,22 @@ def _test_dist_spawn_fn(local_rank, backend, world_size, device):
     assert _model.get_world_size() == world_size
     assert _model.device().type == torch.device(device).type
 
+    if "master_addr" in kwargs:
+        assert os.environ["MASTER_ADDR"] == kwargs["master_addr"]
+    if "master_port" in kwargs:
+        assert os.environ["MASTER_PORT"] == str(kwargs["master_port"])
+
 
 def _test__native_dist_model_spawn(backend, num_workers_per_machine, device, init_method=None, **spawn_kwargs):
+    kwargs_dict = {}
+    for key in ["master_addr", "master_port"]:
+        if key in spawn_kwargs:
+            kwargs_dict[key] = spawn_kwargs[key]
+
     _NativeDistModel.spawn(
         _test_dist_spawn_fn,
         args=(backend, num_workers_per_machine, device),
-        kwargs_dict={},
+        kwargs_dict=kwargs_dict,
         backend=backend,
         nproc_per_node=num_workers_per_machine,
         init_method=init_method,
@@ -499,31 +501,56 @@ def _test__native_dist_model_spawn(backend, num_workers_per_machine, device, ini
 
 @pytest.mark.distributed
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
-@pytest.mark.parametrize("init_method", [None, "env://", "tcp://0.0.0.0:22334", "FILE"])
+@pytest.mark.parametrize("init_method", [None, "CUSTOM_ADDR_PORT", "env://", "FILE"])
 def test__native_dist_model_spawn_gloo(init_method, dirname):
+    spawn_kwargs = {}
+
     if init_method == "FILE":
         init_method = f"file://{dirname}/shared"
+    elif init_method == "CUSTOM_ADDR_PORT":
+        init_method = None
+        spawn_kwargs["master_addr"] = "0.0.0.0"
+        spawn_kwargs["master_port"] = 2345
 
     nproc = torch.cuda.device_count() if torch.cuda.is_available() else 4
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _test__native_dist_model_spawn("gloo", num_workers_per_machine=nproc, device=device, init_method=init_method)
+    _test__native_dist_model_spawn(
+        "gloo", num_workers_per_machine=nproc, device=device, init_method=init_method, **spawn_kwargs
+    )
     if device.type == "cpu":
+        spawn_kwargs["start_method"] = "fork"
         _test__native_dist_model_spawn(
-            "gloo", num_workers_per_machine=nproc, device=device, start_method="fork", init_method=init_method
+            "gloo", num_workers_per_machine=nproc, device=device, init_method=init_method, **spawn_kwargs
         )
+
+    if init_method not in [None, "env://"]:
+        with pytest.raises(ValueError, match=r"master_addr should be None if init_method is provided"):
+            _test__native_dist_model_spawn(
+                "gloo", num_workers_per_machine=nproc, device=device, init_method=init_method, master_addr="abc"
+            )
+        with pytest.raises(ValueError, match=r"master_port should be None if init_method is provided"):
+            _test__native_dist_model_spawn(
+                "gloo", num_workers_per_machine=nproc, device=device, init_method=init_method, master_port=123
+            )
 
 
 @pytest.mark.distributed
 @pytest.mark.skipif("WORLD_SIZE" in os.environ, reason="Skip if launched as multiproc")
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Skip if no GPU")
-@pytest.mark.parametrize("init_method", [None, "tcp://0.0.0.0:22334", "FILE"])
+@pytest.mark.parametrize("init_method", [None, "CUSTOM_ADDR_PORT", "FILE"])
 def test__native_dist_model_spawn_nccl(init_method, dirname):
+    spawn_kwargs = {}
+
     if init_method == "FILE":
         init_method = f"file://{dirname}/shared"
+    elif init_method == "CUSTOM_ADDR_PORT":
+        init_method = None
+        spawn_kwargs["master_addr"] = "0.0.0.0"
+        spawn_kwargs["master_port"] = 2345
 
-    num_workers_per_machine = torch.cuda.device_count()
+    nproc = torch.cuda.device_count()
     _test__native_dist_model_spawn(
-        "nccl", num_workers_per_machine=num_workers_per_machine, device="cuda", init_method=init_method
+        "nccl", num_workers_per_machine=nproc, device="cuda", init_method=init_method, **spawn_kwargs
     )
 
 
@@ -553,47 +580,78 @@ def test__native_dist_model_init_method_is_not_none(world_size, local_rank, get_
         # fmt: off
         # usual SLURM env
         (
-
             {
-                "SLURM_PROCID": "1", "SLURM_LOCALID": "1", "SLURM_NTASKS": "2", "SLURM_JOB_NUM_NODES": "1",
-                "SLURM_JOB_NODELIST": "c1", "SLURM_JOB_ID": "12345",
+                "SLURM_PROCID": "1",
+                "SLURM_LOCALID": "1",
+                "SLURM_NTASKS": "2",
+                "SLURM_JOB_NUM_NODES": "1",
+                "SLURM_JOB_NODELIST": "c1",
+                "SLURM_JOB_ID": "12345",
             },
-            [1, 1, 2, "c1", 17345]
+            [1, 1, 2, "c1", 17345],
         ),
         # usual SLURM env mnode
         (
             {
-                "SLURM_PROCID": "5", "SLURM_LOCALID": "1", "SLURM_NTASKS": "8", "SLURM_JOB_NUM_NODES": "2",
-                "SLURM_JOB_NODELIST": "c1, c2", "SLURM_JOB_ID": "12345",
+                "SLURM_PROCID": "5",
+                "SLURM_LOCALID": "1",
+                "SLURM_NTASKS": "8",
+                "SLURM_JOB_NUM_NODES": "2",
+                "SLURM_JOB_NODELIST": "c1, c2",
+                "SLURM_JOB_ID": "12345",
             },
-            [5, 1, 8, "c1", 17345]
+            [5, 1, 8, "c1", 17345],
         ),
         # usual SLURM env 1 node, 1 task + torch.distributed.launch
         (
             {
-                "SLURM_PROCID": "0", "SLURM_LOCALID": "0", "SLURM_NTASKS": "1", "SLURM_JOB_NUM_NODES": "1",
-                "SLURM_JOB_NODELIST": "c1", "SLURM_JOB_ID": "12345",
-                "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": "2233", "RANK": "2", "LOCAL_RANK": "2", "WORLD_SIZE": "8",
+                "SLURM_PROCID": "0",
+                "SLURM_LOCALID": "0",
+                "SLURM_NTASKS": "1",
+                "SLURM_JOB_NUM_NODES": "1",
+                "SLURM_JOB_NODELIST": "c1",
+                "SLURM_JOB_ID": "12345",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "2233",
+                "RANK": "2",
+                "LOCAL_RANK": "2",
+                "WORLD_SIZE": "8",
             },
-            [2, 2, 8, "127.0.0.1", 2233]
+            [2, 2, 8, "127.0.0.1", 2233],
         ),
         # usual SLURM env + enroot's pytorch hook
         (
             {
-                "SLURM_PROCID": "3", "SLURM_LOCALID": "3", "SLURM_NTASKS": "4", "SLURM_JOB_NUM_NODES": "1",
-                "SLURM_JOB_NODELIST": "c1", "SLURM_JOB_ID": "12345",
-                "MASTER_ADDR": "c1", "MASTER_PORT": "12233", "RANK": "3", "LOCAL_RANK": "3", "WORLD_SIZE": "4",
+                "SLURM_PROCID": "3",
+                "SLURM_LOCALID": "3",
+                "SLURM_NTASKS": "4",
+                "SLURM_JOB_NUM_NODES": "1",
+                "SLURM_JOB_NODELIST": "c1",
+                "SLURM_JOB_ID": "12345",
+                "MASTER_ADDR": "c1",
+                "MASTER_PORT": "12233",
+                "RANK": "3",
+                "LOCAL_RANK": "3",
+                "WORLD_SIZE": "4",
             },
-            [3, 3, 4, "c1", 12233]
+            [3, 3, 4, "c1", 12233],
         ),
         # usual SLURM env mnode + enroot's pytorch hook
         (
             {
-                "SLURM_PROCID": "3", "SLURM_LOCALID": "1", "SLURM_NTASKS": "4", "SLURM_JOB_NUM_NODES": "2",
-                "SLURM_JOB_NODELIST": "c1, c2", "SLURM_JOB_ID": "12345",
-                "MASTER_ADDR": "c1", "MASTER_PORT": "12233", "RANK": "3", "LOCAL_RANK": "1", "WORLD_SIZE": "4"
+                "SLURM_PROCID": "3",
+                "SLURM_LOCALID": "1",
+                "SLURM_NTASKS": "4",
+                "SLURM_JOB_NUM_NODES": "2",
+                "SLURM_JOB_NODELIST": "c1, c2",
+                "SLURM_JOB_ID": "12345",
+                "MASTER_ADDR": "c1",
+                "MASTER_PORT": "12233",
+                "RANK": "3",
+                "LOCAL_RANK": "1",
+                "WORLD_SIZE": "4",
             },
-            [3, 1, 4, "c1", 12233]
+            [3, 1, 4, "c1", 12233],
         ),
         # fmt: on
     ],
@@ -667,3 +725,8 @@ def test__setup_ddp_vars_from_slurm_env_bad_configs():
             "SLURM_JOB_ID": "12345",
         }
         _setup_ddp_vars_from_slurm_env(environ)
+
+
+def test__native_dist_model_tcp_init_method_error():
+    with pytest.raises(ValueError, match="will hang. To fix this, please configure MASTER_ADDR"):
+        _NativeDistModel.create_from_backend(backend="gloo", init_method="tcp://10.1.1.20:23456", rank=0, world_size=1)

@@ -6,7 +6,6 @@ from ignite.handlers import DiskSaver
 
 
 def initialize(config):
-
     device = idist.device()
 
     model = config.model.to(device)
@@ -14,21 +13,7 @@ def initialize(config):
 
     # Adapt model to dist config
     model = idist.auto_model(model)
-
-    if idist.backend() == "horovod":
-        accumulation_steps = config.get("accumulation_steps", 1)
-        # Can not use auto_optim with Horovod: https://github.com/horovod/horovod/issues/2670
-        import horovod.torch as hvd
-
-        optimizer = hvd.DistributedOptimizer(
-            optimizer, named_parameters=model.named_parameters(), backward_passes_per_step=accumulation_steps,
-        )
-        hvd.broadcast_optimizer_state(optimizer, root_rank=0)
-        if accumulation_steps > 1:
-            # disable manual grads accumulation as it is already done on optimizer's side
-            config.accumulation_steps = 1
-    else:
-        optimizer = idist.auto_optim(optimizer)
+    optimizer = idist.auto_optim(optimizer)
     criterion = config.criterion.to(device)
 
     return model, optimizer, criterion
@@ -66,7 +51,7 @@ def log_metrics(logger, epoch, elapsed, tag, metrics):
 
 def get_save_handler(output_path, with_clearml):
     if with_clearml:
-        from ignite.contrib.handlers.clearml_logger import ClearMLSaver
+        from ignite.handlers.clearml_logger import ClearMLSaver
 
         return ClearMLSaver(dirname=output_path)
 

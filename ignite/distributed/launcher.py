@@ -1,4 +1,7 @@
-from typing import Any, Callable, Dict, Optional
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
 
 from ignite.distributed import utils as idist
 from ignite.utils import setup_logger
@@ -23,7 +26,7 @@ class Parallel:
     provided ``backend`` (useful for standalone scripts).
 
     2) Only initialize a processing group given the ``backend``
-    (useful with tools like `torch.distributed.launch`_, `horovodrun`_, etc).
+    (useful with tools like `torchrun`_, `horovodrun`_, etc).
 
     Args:
         backend: backend to use: `nccl`, `gloo`, `xla-tpu`, `horovod`. If None, no distributed
@@ -50,14 +53,14 @@ class Parallel:
         spawn_kwargs: kwargs to ``idist.spawn`` function.
 
     Examples:
-        1) Single node or Multi-node, Multi-GPU training launched with `torch.distributed.launch`_ or `horovodrun`_
+        1) Single node or Multi-node, Multi-GPU training launched with `torchrun` or `horovodrun`_
         tools
 
         Single node option with 4 GPUs
 
         .. code-block:: bash
 
-            python -m torch.distributed.launch --nproc_per_node=4 --use_env main.py
+            torchrun --nproc_per_node=4 main.py
             # or if installed horovod
             horovodrun -np=4 python main.py
 
@@ -66,15 +69,15 @@ class Parallel:
         .. code-block:: bash
 
             ## node 0
-            python -m torch.distributed.launch --nnodes=2 --node_rank=0 --master_addr=master \
-                --master_port=3344 --nproc_per_node=8 --use_env main.py
+            torchrun --nnodes=2 --node_rank=0 --master_addr=master --master_port=3344 \
+            --nproc_per_node=8 main.py
 
             # or if installed horovod
             horovodrun -np 16 -H hostname1:8,hostname2:8 python main.py
 
             ## node 1
-            python -m torch.distributed.launch --nnodes=2 --node_rank=1 --master_addr=master \
-                --master_port=3344 --nproc_per_node=8 --use_env main.py
+            torchrun --nnodes=2 --node_rank=1 --master_addr=master --master_port=3344 \
+            --nproc_per_node=8 main.py
 
 
         User code is the same for both options:
@@ -91,6 +94,8 @@ class Parallel:
                 # ...
 
             backend = "nccl"  # or "horovod" if package is installed
+
+            config = {"key": "value"}
 
             with idist.Parallel(backend=backend) as parallel:
                 parallel.run(training, config, a=1, b=2)
@@ -127,12 +132,6 @@ class Parallel:
             with idist.Parallel(backend=backend, init_method='file:///d:/tmp/some_file', nproc_per_node=4) as parallel:
                 parallel.run(training, config, a=1, b=2)
 
-        Initializing the process using ``tcp://``
-
-        .. code-block:: python
-
-            with idist.Parallel(backend=backend, init_method='tcp://10.1.1.20:23456', nproc_per_node=4) as parallel:
-                parallel.run(training, config, a=1, b=2)
 
 
         3) Single node, Multi-TPU training launched with `python`
@@ -151,6 +150,8 @@ class Parallel:
                 # ...
                 print(idist.get_rank(), ": run with config:", config, "- backend=", idist.backend())
                 # ...
+
+            config = {"key": "value"}
 
             with idist.Parallel(backend="xla-tpu", nproc_per_node=8) as parallel:
                 parallel.run(training, config, a=1, b=2)
@@ -188,12 +189,13 @@ class Parallel:
                 "master_port": 15000
             }
 
+            config = {"key": "value"}
+
             with idist.Parallel(backend="nccl", **dist_config) as parallel:
                 parallel.run(training, config, a=1, b=2)
 
 
-
-    .. _torch.distributed.launch: https://pytorch.org/docs/stable/distributed.html#launch-utility
+    .. _torchrun: https://pytorch.org/docs/stable/elastic/run.html#launcher-api
     .. _horovodrun: https://horovod.readthedocs.io/en/latest/api.html#module-horovod.run
     .. _dist.init_process_group: https://pytorch.org/docs/stable/distributed.html#torch.distributed.init_process_group
     .. versionchanged:: 0.4.2
@@ -206,13 +208,13 @@ class Parallel:
 
     def __init__(
         self,
-        backend: Optional[str] = None,
-        nproc_per_node: Optional[int] = None,
-        nnodes: Optional[int] = None,
-        node_rank: Optional[int] = None,
-        master_addr: Optional[str] = None,
-        master_port: Optional[int] = None,
-        init_method: Optional[str] = None,
+        backend: str | None = None,
+        nproc_per_node: int | None = None,
+        nnodes: int | None = None,
+        node_rank: int | None = None,
+        master_addr: str | None = None,
+        master_port: int | None = None,
+        init_method: str | None = None,
         **spawn_kwargs: Any,
     ) -> None:
         if backend is not None:
@@ -224,6 +226,13 @@ class Parallel:
             for name, value in zip(arg_names, arg_values):
                 if value is not None:
                     raise ValueError(f"If backend is None, argument '{name}' should be also None, but given {value}")
+
+        if init_method is not None and init_method.startswith("tcp://"):
+            raise ValueError(
+                f"TCP initialization via init_method='{init_method}' will hang. "
+                "To fix this, please configure MASTER_ADDR and MASTER_PORT in the environment and "
+                "use 'env://' (or omit init_method)."
+            )
 
         self.backend = backend
         self._spawn_params = None
@@ -241,13 +250,13 @@ class Parallel:
     @staticmethod
     def _setup_spawn_params(
         nproc_per_node: int,
-        nnodes: Optional[int] = None,
-        node_rank: Optional[int] = None,
-        master_addr: Optional[str] = None,
-        master_port: Optional[int] = None,
-        init_method: Optional[str] = None,
+        nnodes: int | None = None,
+        node_rank: int | None = None,
+        master_addr: str | None = None,
+        master_port: int | None = None,
+        init_method: str | None = None,
         **spawn_kwargs: Any,
-    ) -> Dict:
+    ) -> dict:
         if nproc_per_node < 1:
             raise ValueError(f"Argument nproc_per_node should positive, but given {nproc_per_node}")
         if nnodes is None:
@@ -260,9 +269,9 @@ class Parallel:
             node_rank = 0
         if node_rank >= nnodes or node_rank < 0:
             raise ValueError(f"Argument node_rank should be between 0 and {nnodes - 1}, but given {node_rank}")
-        if nnodes > 1 and (master_addr is None or master_port is None or init_method is None):
+        if nnodes > 1 and (master_addr is None or master_port is None) and init_method is None:
             raise ValueError(
-                "If number of nodes larger than one, arguments master_addr and master_port or init_method"
+                "If number of nodes larger than one, arguments master_addr and master_port or init_method "
                 f"should be specified, but given master_addr={master_addr}, master_port={master_port} and "
                 f"init_method={init_method}."
             )
@@ -294,6 +303,8 @@ class Parallel:
                     print(idist.get_rank(), ": run with config:", config, "- backend=", idist.backend())
                     # ...
 
+                config = {"key": "value"}
+
                 with idist.Parallel(backend=backend) as parallel:
                     parallel.run(training, config, a=1, b=2)
 
@@ -315,21 +326,15 @@ class Parallel:
             idist.initialize(self.backend, init_method=self.init_method)
 
         # The logger can be setup from now since idist.initialize() has been called (if needed)
-        self._logger = setup_logger(__name__ + "." + self.__class__.__name__)  # type: ignore[assignment]
+        self._logger = setup_logger(__name__ + "." + self.__class__.__name__)
 
         if self.backend is not None:
             if self._spawn_params is None:
-                self._logger.info(  # type: ignore[attr-defined]
-                    f"Initialized processing group with backend: '{self.backend}'"
-                )
+                self._logger.info(f"Initialized processing group with backend: '{self.backend}'")
             else:
-                self._logger.info(  # type: ignore[attr-defined]
-                    f"Initialized distributed launcher with backend: '{self.backend}'"
-                )
+                self._logger.info(f"Initialized distributed launcher with backend: '{self.backend}'")
                 msg = "\n\t".join([f"{k}: {v}" for k, v in self._spawn_params.items() if v is not None])
-                self._logger.info(  # type: ignore[attr-defined]
-                    f"- Parameters to spawn processes: \n\t{msg}"
-                )
+                self._logger.info(f"- Parameters to spawn processes: \n\t{msg}")
 
         return self
 
